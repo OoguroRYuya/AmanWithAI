@@ -46,8 +46,6 @@ Keempat sebab artefak pada Eksperimen 1 ditangani secara langsung:
 - **Pembersihan backscatter**: balasan SYN-ACK dari Target ke IP penyerang yang
   dipalsukan (tujuan `192.168.20.0/24`) dibuang **sebelum** pelabelan agar tidak
   salah dilabeli sebagai trafik normal.
-- **packet_count kini asli** dibaca dari field `%pkt` NetFlow, tidak lagi diestimasi
-  dari byte_count seperti Eksperimen 1.
 
 ## 4. Dataset v2
 Dikumpulkan dalam **4 sesi** independen. Tiap sesi dilabeli terpisah lalu digabung,
@@ -149,7 +147,7 @@ sahih dari artefak adalah ketiga sifat di atas — ketiganya kini terpenuhi.
 | Sumber serangan | 1 IP (DoS) | Banyak IP alias (DDoS sesungguhnya) |
 | Trafik normal vs serangan | Sesi terpisah | Bercampur dalam waktu |
 | `unique_src_ip_per_dst` | Konstan 1 (zero-variance) | Bervariasi (kontribusi 6,6%) |
-| packet_count | Diestimasi dari byte | Asli dari NetFlow (`%pkt`) |
+| packet_count | Diestimasi dari byte | Tetap diestimasi (lihat Keterbatasan) |
 | Pelabelan | Per-file (1 file = 1 kelas) | Per-window (per flow) |
 | Skema uji | Split 70:30 acak | Hold-out per-sesi (bebas leakage) |
 | Akurasi RF | 100% | 99,77% |
@@ -163,6 +161,15 @@ sahih dari artefak adalah ketiga sifat di atas — ketiganya kini terpenuhi.
 - ARP spoofing tetap tidak dijadikan kelas deteksi (Layer 2, tak terlihat NetFlow) —
   dicatat sebagai saran penelitian lanjutan.
 - Tetap menggunakan NetFlow v5 karena v9 tidak terbaca oleh nfdump 1.7.6 pada lab ini.
+- **packet_count masih diestimasi** dari byte_count (± `byte_count/84`), sama seperti
+  Eksperimen 1, karena exporter `ipt_NETFLOW` tidak mengisi field jumlah paket.
+  Dampaknya: fitur turunan `avg_packet_size` ikut mendekati nilai tetap sehingga
+  kontribusinya rendah (RF 0,02). Hal ini tidak membatalkan hasil — `avg_packet_size`
+  justru sudah bukan lagi fitur dominan seperti di Eksperimen 1 — tetapi dicatat
+  sebagai keterbatasan telemetri. Kode ekstraksi (`ekstraksi_fitur.py`) telah
+  diperbaiki agar membaca field paket secara langsung bila exporter mengisinya,
+  sehingga keterbatasan ini dapat diatasi pada penelitian lanjutan dengan exporter
+  yang mendukung penghitungan paket.
 
 ## 10. Kesimpulan
 Perbaikan realisme data pada Eksperimen 2 berhasil menghilangkan artefak akurasi

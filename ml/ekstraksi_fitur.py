@@ -43,6 +43,10 @@ ESTIMASI_UKURAN_PAKET = 84
 # Set False bila exporter NetFlow-mu sudah mengisi packet count dengan benar.
 ESTIMASI_PACKET_COUNT = True
 
+# Berapa banyak flow yang packet_count-nya benar-benar diestimasi pada ekstraksi
+# terakhir (0 = exporter mengisi field paket, jadi tidak ada yang diestimasi).
+_JML_TERESTIMASI = 0
+
 # Pemetaan nama protokol ke nomor, supaya model menerima input numerik
 PROTOCOL_MAP = {"TCP": 6, "UDP": 17, "ICMP": 1}
 
@@ -66,16 +70,55 @@ def set_window(detik):
     WINDOW_SECONDS = detik
 
 
+# Urutan kolom default untuk ekspor nfdump TANPA header, yakni:
+#   nfdump -R /data/nfcapd -o "fmt:%ts,%td,%pr,%sa,%sp,%da,%dp,%flg,%pkt,%byt"
+# Dipasang otomatis oleh baca_nfdump_csv bila file tidak punya baris header,
+# sehingga langkah `sed -i '1i ts,td,...'` manual tidak lagi diperlukan.
+KOLOM_FMT_DEFAULT = ["ts", "td", "pr", "sa", "sp", "da", "dp", "flg", "pkt", "byt"]
+
+# Nama-nama yang, bila muncul di baris pertama, menandakan baris itu HEADER
+# (bukan data flow). Dipakai untuk mendeteksi ada/tidaknya header.
+_NAMA_HEADER = {
+    "ts", "te", "td", "first", "firstseen", "last", "lastseen",
+    "pr", "proto", "protocol", "sa", "da", "srcip", "dstip", "sp", "dp",
+}
+
+
+def _punya_header(path):
+    """True bila baris pertama file berisi nama kolom, bukan data flow."""
+    with open(path, "r", errors="replace") as f:
+        baris1 = f.readline()
+    token = [t.strip().lower() for t in baris1.split(",")]
+    return any(t in _NAMA_HEADER for t in token)
+
+
 def baca_nfdump_csv(path):
     """
-    Membaca output `nfdump -o csv`.
+    Membaca output nfdump, baik yang BERHEADER (`-o csv`) maupun yang TANPA
+    header (`-o fmt:...`). Bila tidak ada header, nama kolom default
+    (KOLOM_FMT_DEFAULT) dipasang otomatis — jadi `sed` manual tidak perlu lagi.
 
     nfdump menambahkan baris ringkasan di bagian akhir file yang bukan data
     flow, sehingga baris-baris tersebut perlu dibuang lebih dulu.
     """
     # skipinitialspace: format kustom nfdump (-o fmt:) menambahkan spasi
     # untuk merapikan kolom, misalnya ", 192.168.20.10"
-    df = pd.read_csv(path, low_memory=False, skipinitialspace=True)
+    if _punya_header(path):
+        df = pd.read_csv(path, low_memory=False, skipinitialspace=True)
+    else:
+        # Tanpa header: pasang nama kolom default HANYA bila jumlah kolomnya
+        # cocok; kalau tidak, baca apa adanya sambil beri peringatan.
+        probe = pd.read_csv(path, header=None, nrows=1, skipinitialspace=True)
+        if probe.shape[1] == len(KOLOM_FMT_DEFAULT):
+            df = pd.read_csv(path, header=None, names=KOLOM_FMT_DEFAULT,
+                             low_memory=False, skipinitialspace=True)
+        else:
+            print(
+                f"PERINGATAN: file tidak berheader dan jumlah kolomnya "
+                f"({probe.shape[1]}) tidak sama dengan {len(KOLOM_FMT_DEFAULT)} "
+                f"kolom default. File dibaca apa adanya; periksa format ekspornya."
+            )
+            df = pd.read_csv(path, header=None, low_memory=False, skipinitialspace=True)
     df.columns = [str(c).strip() for c in df.columns]
     for c in df.columns:
         if df[c].dtype == object:
@@ -106,8 +149,8 @@ def normalisasi_kolom(df):
         "dp": ["dp", "dstport"],
         "pr": ["pr", "proto", "protocol"],
         "flg": ["flg", "flags"],
-        "ipkt": ["ipkt", "packets", "pkts"],
-        "ibyt": ["ibyt", "bytes", "byt"],
+        "ipkt": ["ipkt", "packets", "pkts", "pkt"],
+        "ibyt": ["ibyt", "bytes", "byt", "byte"],
     }
 
     kolom_asli = {c.lower().strip(): c for c in df.columns}
@@ -228,8 +271,11 @@ def ekstrak(path_csv, label=None):
     # Bila seluruh packet_count bernilai nol padahal byte_count terisi,
     # itu tanda exporter tidak mengirim field packet count. Dalam kasus ini
     # packet count diestimasi dari byte count.
+    global _JML_TERESTIMASI
+    _JML_TERESTIMASI = 0
     if ESTIMASI_PACKET_COUNT:
         packet_kosong = (df["packet_count"] == 0) & (df["byte_count"] > 0)
+        _JML_TERESTIMASI = int(packet_kosong.sum())
         if packet_kosong.any():
             estimasi = (df["byte_count"] / ESTIMASI_UKURAN_PAKET).round().clip(lower=1)
             df.loc[packet_kosong, "packet_count"] = estimasi[packet_kosong].astype("int64")
@@ -308,13 +354,16 @@ def main():
     if args.label:
         print(f"Label: {args.label}")
 
-    # Beri tahu bila packet count diestimasi
-    if ESTIMASI_PACKET_COUNT:
+    # Beri tahu HANYA bila ada packet count yang benar-benar diestimasi
+    if ESTIMASI_PACKET_COUNT and _JML_TERESTIMASI > 0:
         print(
             f"\nCatatan: packet_count diestimasi dari byte_count "
-            f"(ukuran paket ~{ESTIMASI_UKURAN_PAKET} byte), "
-            f"karena exporter NetFlow tidak mengisi field ini."
+            f"(ukuran paket ~{ESTIMASI_UKURAN_PAKET} byte) untuk "
+            f"{_JML_TERESTIMASI:,} flow, karena exporter NetFlow tidak mengisi "
+            f"field paket pada flow tersebut."
         )
+    elif _JML_TERESTIMASI == 0:
+        print("\nCatatan: packet_count dibaca langsung dari field paket NetFlow (tanpa estimasi).")
 
     print("\nRingkasan statistik:")
     print(df[FEATURE_COLUMNS].describe().T[["mean", "min", "max"]].round(3))
