@@ -1,0 +1,77 @@
+{
+  "model_terbaik": "Random Forest",
+  "hasil": [
+    {
+      "nama": "Random Forest",
+      "accuracy": 0.9976540736034407,
+      "precision_macro": 0.9949898563063647,
+      "recall_macro": 0.9965004277835638,
+      "f1_macro": 0.9957426496859205,
+      "confusion_matrix": [
+        [
+          6355,
+          54,
+          0
+        ],
+        [
+          89,
+          45059,
+          0
+        ],
+        [
+          0,
+          1,
+          9825
+        ]
+      ],
+      "feature_importance": {
+        "dst_port_count": 0.3545075056509418,
+        "duration": 0.17702941555780666,
+        "byte_count": 0.1479885491629346,
+        "packet_count": 0.1259723113508844,
+        "unique_src_ip_per_dst": 0.06611176175431212,
+        "inter_arrival_time": 0.05977208285107458,
+        "syn_flag_count": 0.022213862982822744,
+        "flow_rate": 0.022137328680145014,
+        "avg_packet_size": 0.02074434863774027,
+        "protocol": 0.0035228333713378714
+      }
+    },
+    {
+      "nama": "XGBoost",
+      "accuracy": 0.9971490477819591,
+      "precision_macro": 0.9939660824957747,
+      "recall_macro": 0.9956733124193095,
+      "f1_macro": 0.9948166099556982,
+      "confusion_matrix": [
+        [
+          6341,
+          68,
+          0
+        ],
+        [
+          107,
+          45041,
+          0
+        ],
+        [
+          0,
+          0,
+          9826
+        ]
+      ],
+      "feature_importance": {
+        "duration": 0.43906667828559875,
+        "dst_port_count": 0.3190648853778839,
+        "packet_count": 0.17072638869285583,
+        "protocol": 0.025578368455171585,
+        "unique_src_ip_per_dst": 0.021083490923047066,
+        "syn_flag_count": 0.013161927461624146,
+        "byte_count": 0.006530269514769316,
+        "flow_rate": 0.002506161807104945,
+        "inter_arrival_time": 0.0013940248172730207,
+        "avg_packet_size": 0.0008877522777765989
+      }
+    }
+  ]
+}
