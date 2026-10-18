@@ -237,8 +237,20 @@ def hitung_inter_arrival(df):
     return pd.Series(hasil, index=df.index).fillna(0.0)
 
 
-def ekstrak(path_csv, label=None):
-    """Fungsi utama: membaca CSV nfdump dan mengembalikan DataFrame 10 fitur."""
+def ekstrak(path_csv, label=None, sertakan_ip=False, estimasi_paksa=False):
+    """
+    Fungsi utama: membaca CSV nfdump dan mengembalikan DataFrame 10 fitur.
+
+    sertakan_ip : bool
+        Bila True, kolom `sa`, `da`, `dp`, dan `window` (indeks jendela
+        WINDOW_SECONDS dari `ts`) ikut dikembalikan di belakang 10 fitur.
+        Kolom ini dibawa dari DataFrame yang sama, jadi urutan barisnya pasti
+        cocok. Bila False, keluaran sama persis dengan sebelumnya.
+    estimasi_paksa : bool
+        Bila True, packet_count SELURUH flow diestimasi dari byte_count
+        (byte / ESTIMASI_UKURAN_PAKET), sama seperti saat data latih dibuat,
+        meskipun exporter mengisi field paket.
+    """
     mentah = baca_nfdump_csv(path_csv)
     if mentah.empty:
         raise ValueError("File tidak berisi flow record yang valid.")
@@ -273,7 +285,9 @@ def ekstrak(path_csv, label=None):
     # packet count diestimasi dari byte count.
     global _JML_TERESTIMASI
     _JML_TERESTIMASI = 0
-    if ESTIMASI_PACKET_COUNT:
+    if estimasi_paksa:
+        df["packet_count"] = 0
+    if ESTIMASI_PACKET_COUNT or estimasi_paksa:
         packet_kosong = (df["packet_count"] == 0) & (df["byte_count"] > 0)
         _JML_TERESTIMASI = int(packet_kosong.sum())
         if packet_kosong.any():
@@ -311,6 +325,12 @@ def ekstrak(path_csv, label=None):
 
     hasil = df[FEATURE_COLUMNS].copy()
     hasil = hasil.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+    if sertakan_ip:
+        hasil["sa"] = df["sa"].astype(str)
+        hasil["da"] = df["da"].astype(str)
+        hasil["dp"] = df["dp"]
+        hasil["window"] = df["window"]
 
     if label is not None:
         hasil["label"] = label

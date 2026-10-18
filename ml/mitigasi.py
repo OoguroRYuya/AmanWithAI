@@ -170,21 +170,76 @@ class ModulMitigasi:
 
         return berhasil
 
+    def blokir_banyak(self, ips, durasi_menit=15, alasan=""):
+        """
+        Memblokir banyak alamat IP dalam SATU sesi SSH dan satu commit.
+
+        Dipakai untuk flood dengan sumber palsu (bisa ratusan IP) agar tidak
+        membuka satu sesi per IP. IP yang sudah terblokir tidak dikirim ulang
+        ke router; waktu kedaluwarsanya cukup diperpanjang.
+
+        Mengembalikan daftar IP yang kini terblokir (kosong bila gagal).
+        """
+        ips = sorted(set(ips))
+        if not ips:
+            return []
+
+        kedaluwarsa = datetime.now() + timedelta(minutes=durasi_menit)
+        baru = [ip for ip in ips if ip not in self.terblokir]
+
+        if baru:
+            perintah = [
+                f"set firewall group address-group {FIREWALL_GROUP} address {ip}"
+                for ip in baru
+            ]
+            deskripsi = f"memblokir {len(baru)} IP dalam satu sesi selama {durasi_menit} menit"
+            if alasan:
+                deskripsi += f" ({alasan})"
+            if not self._jalankan(perintah, deskripsi):
+                return []
+
+        diperpanjang = len(ips) - len(baru)
+        if diperpanjang:
+            log.info(f"{diperpanjang} IP sudah terblokir, durasi diperpanjang")
+
+        for ip in ips:
+            self.terblokir[ip] = kedaluwarsa
+        return ips
+
+    def cabut_banyak(self, ips):
+        """
+        Mencabut pemblokiran banyak alamat IP dalam satu sesi SSH.
+        Mengembalikan daftar IP yang berhasil dicabut (kosong bila gagal).
+        """
+        ips = sorted(set(ips))
+        if not ips:
+            return []
+
+        perintah = [
+            f"delete firewall group address-group {FIREWALL_GROUP} address {ip}"
+            for ip in ips
+        ]
+        if not self._jalankan(perintah, f"mencabut blokir {len(ips)} IP dalam satu sesi"):
+            return []
+
+        for ip in ips:
+            self.terblokir.pop(ip, None)
+        return ips
+
     def cabut_kedaluwarsa(self):
         """
         Mencabut seluruh pemblokiran yang sudah melewati waktu kedaluwarsa.
 
         Dipanggil secara berkala oleh backend, misalnya setiap satu menit.
-        Mengembalikan daftar IP yang berhasil dicabut.
+        Seluruh IP kedaluwarsa dicabut dalam satu sesi. Mengembalikan daftar
+        IP yang berhasil dicabut.
         """
         sekarang = datetime.now()
         kedaluwarsa = [ip for ip, waktu in self.terblokir.items() if waktu <= sekarang]
 
-        dicabut = []
-        for ip in kedaluwarsa:
-            if self.cabut(ip):
-                dicabut.append(ip)
-                log.info(f"Blokir {ip} dicabut otomatis karena kedaluwarsa")
+        dicabut = self.cabut_banyak(kedaluwarsa)
+        if dicabut:
+            log.info(f"{len(dicabut)} blokir dicabut otomatis karena kedaluwarsa")
 
         return dicabut
 
