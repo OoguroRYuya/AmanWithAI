@@ -16,11 +16,14 @@ Dokumentasi API otomatis tersedia di:
 """
 
 import asyncio
+import os
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -33,16 +36,51 @@ from saran_tindakan import susun_saran      # noqa: E402
 
 # ------------------------------------------------------------- konfigurasi
 
-ROUTER_HOST = "192.168.10.1"
-ROUTER_USER = "vyos"
-ROUTER_PASS = "vyos"
+# Nilai dibaca dari environment / backend/.env (lihat backend/.env.example).
+# Nilai default di bawah adalah nilai aman untuk lab.
+load_dotenv(Path(__file__).parent / ".env")
+
+
+def _env_bool(nama, default):
+    nilai = os.getenv(nama)
+    if nilai is None:
+        return default
+    return nilai.strip().lower() in ("1", "true", "ya", "yes", "on")
+
+
+def _env_list(nama, default):
+    nilai = os.getenv(nama)
+    if nilai is None:
+        return list(default)
+    return [x.strip() for x in nilai.split(",") if x.strip()]
+
+
+ROUTER_HOST = os.getenv("ROUTER_HOST", "192.168.42.198")
+ROUTER_USER = os.getenv("ROUTER_USER", "vyos")
+ROUTER_PASS = os.getenv("ROUTER_PASS", "vyos")
 
 # Mode dry run mencegah perintah benar-benar dikirim ke router.
-# Ubah menjadi False setelah pengujian di lingkungan simulasi selesai.
-DRY_RUN = True
+# Ubah menjadi false (DRY_RUN=false) setelah pengujian di lab selesai.
+DRY_RUN = _env_bool("DRY_RUN", True)
 
-MODEL_PATH = Path(__file__).parent.parent / "model" / "model_terbaik.pkl"
-LABEL_PATH = Path(__file__).parent.parent / "model" / "label_kelas.pkl"
+# Ambang tingkat kepercayaan: >= TINGGI -> mitigasi otomatis,
+# SEDANG..TINGGI -> menunggu persetujuan, < SEDANG -> hanya dicatat
+AMBANG_TINGGI = float(os.getenv("AMBANG_TINGGI", "0.90"))
+AMBANG_SEDANG = float(os.getenv("AMBANG_SEDANG", "0.70"))
+
+# Gerbang mitigasi per insiden (D3), dipakai oleh pipeline live (fase 2)
+MIN_FLOW_INSIDEN = int(os.getenv("MIN_FLOW_INSIDEN", "20"))
+AMBANG_RASIO_SERANGAN = float(os.getenv("AMBANG_RASIO_SERANGAN", "0.80"))
+
+# Alamat yang tidak boleh diblokir otomatis: gateway VyOS tiap subnet,
+# Collector, dan host backend (IP Windows dilihat dari VM GNS3)
+ALLOWLIST = set(_env_list("ALLOWLIST", [
+    "192.168.10.1", "192.168.20.1", "192.168.30.1", "192.168.100.1",
+    "192.168.100.10",
+    "192.168.172.1",
+]))
+
+MODEL_PATH = Path(__file__).parent.parent / "ml" / "model" / "model_terbaik.pkl"
 
 FITUR = [
     "duration", "packet_count", "byte_count", "dst_port_count",
@@ -52,12 +90,71 @@ FITUR = [
 
 MAKS_RIWAYAT = 500
 
+# Penyimpanan sementara di memori. Untuk penggunaan jangka panjang,
+# sebaiknya diganti dengan basis data.
+riwayat_deteksi: List[dict] = []
+model = None
+label_kelas = None
+mitigator: Optional[ModulMitigasi] = None
+
+
+# ------------------------------------------------------------- siklus hidup
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Memuat model dan menyiapkan modul mitigasi saat server dinyalakan."""
+    global model, label_kelas, mitigator
+
+    try:
+        import joblib
+        model = joblib.load(MODEL_PATH)
+        # Daftar kelas diambil langsung dari model agar selalu konsisten
+        label_kelas = [str(k) for k in model.classes_]
+        print(f"Model dimuat: {MODEL_PATH.name}")
+        print(f"Kelas: {label_kelas}")
+    except Exception as e:
+        print(f"PERINGATAN: model gagal dimuat ({e})")
+        print("Endpoint /api/deteksi tidak akan berfungsi sampai model tersedia.")
+
+    mitigator = ModulMitigasi(
+        host=ROUTER_HOST,
+        username=ROUTER_USER,
+        password=ROUTER_PASS,
+        dry_run=DRY_RUN,
+    )
+    print(f"Modul mitigasi siap (router={ROUTER_HOST}, dry_run={DRY_RUN})")
+
+    # Tugas latar belakang untuk mencabut blokir yang sudah kedaluwarsa
+    tugas_pencabut = asyncio.create_task(pencabut_berkala())
+
+    yield
+
+    tugas_pencabut.cancel()
+
+
+async def pencabut_berkala():
+    """Memeriksa dan mencabut pemblokiran kedaluwarsa setiap satu menit."""
+    while True:
+        await asyncio.sleep(60)
+        if mitigator:
+            dicabut = mitigator.cabut_kedaluwarsa()
+            for ip in dicabut:
+                riwayat_deteksi.insert(0, {
+                    "waktu": datetime.now().isoformat(),
+                    "jenis": "pencabutan_otomatis",
+                    "src_ip": ip,
+                    "keterangan": "Blokir dicabut karena durasi berakhir",
+                })
+
+
 # --------------------------------------------------------------- aplikasi
 
 app = FastAPI(
     title="Sistem Dashboard Keamanan Jaringan NDR",
     description="API deteksi dan mitigasi serangan siber pada jaringan kampus",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS diperlukan agar frontend Next.js pada port berbeda dapat mengakses API
@@ -68,13 +165,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Penyimpanan sementara di memori. Untuk penggunaan jangka panjang,
-# sebaiknya diganti dengan basis data.
-riwayat_deteksi: List[dict] = []
-model = None
-label_kelas = None
-mitigator: Optional[ModulMitigasi] = None
 
 
 # ----------------------------------------------------------------- skema
@@ -102,51 +192,6 @@ class MitigasiRequest(BaseModel):
     alasan: str = ""
 
 
-# ------------------------------------------------------------- siklus hidup
-
-
-@app.on_event("startup")
-async def startup():
-    """Memuat model dan menyiapkan modul mitigasi saat server dinyalakan."""
-    global model, label_kelas, mitigator
-
-    try:
-        import joblib
-        model = joblib.load(MODEL_PATH)
-        label_kelas = joblib.load(LABEL_PATH)
-        print(f"Model dimuat: {MODEL_PATH.name}")
-        print(f"Kelas: {label_kelas}")
-    except Exception as e:
-        print(f"PERINGATAN: model gagal dimuat ({e})")
-        print("Endpoint /api/deteksi tidak akan berfungsi sampai model tersedia.")
-
-    mitigator = ModulMitigasi(
-        host=ROUTER_HOST,
-        username=ROUTER_USER,
-        password=ROUTER_PASS,
-        dry_run=DRY_RUN,
-    )
-    print(f"Modul mitigasi siap (dry_run={DRY_RUN})")
-
-    # Tugas latar belakang untuk mencabut blokir yang sudah kedaluwarsa
-    asyncio.create_task(pencabut_berkala())
-
-
-async def pencabut_berkala():
-    """Memeriksa dan mencabut pemblokiran kedaluwarsa setiap satu menit."""
-    while True:
-        await asyncio.sleep(60)
-        if mitigator:
-            dicabut = mitigator.cabut_kedaluwarsa()
-            for ip in dicabut:
-                riwayat_deteksi.insert(0, {
-                    "waktu": datetime.now().isoformat(),
-                    "jenis": "pencabutan_otomatis",
-                    "src_ip": ip,
-                    "keterangan": "Blokir dicabut karena durasi berakhir",
-                })
-
-
 # --------------------------------------------------------------- endpoint
 
 
@@ -158,6 +203,9 @@ async def status():
         "kelas": label_kelas,
         "router": ROUTER_HOST,
         "dry_run": DRY_RUN,
+        "ambang_tinggi": AMBANG_TINGGI,
+        "ambang_sedang": AMBANG_SEDANG,
+        "allowlist": sorted(ALLOWLIST),
         "total_deteksi": len(riwayat_deteksi),
         "ip_terblokir": len(mitigator.terblokir) if mitigator else 0,
     }
@@ -196,6 +244,8 @@ async def deteksi(flow: FlowInput):
         byte_count=flow.byte_count,
         flow_rate=flow.flow_rate,
         dst_port_count=flow.dst_port_count,
+        ambang_tinggi=AMBANG_TINGGI,
+        ambang_sedang=AMBANG_SEDANG,
     )
 
     entri = {
@@ -211,8 +261,9 @@ async def deteksi(flow: FlowInput):
     }
 
     # Mitigasi otomatis hanya dijalankan bila kelas merupakan serangan
-    # dan tingkat kepercayaan melewati ambang yang ditetapkan
-    if saran["mitigasi_otomatis"] and mitigator:
+    # dan tingkat kepercayaan melewati ambang yang ditetapkan.
+    # Alamat pada allowlist (gateway, Collector, backend) tidak pernah diblokir.
+    if saran["mitigasi_otomatis"] and mitigator and flow.src_ip not in ALLOWLIST:
         berhasil = mitigator.blokir(
             flow.src_ip,
             durasi_menit=saran.get("durasi_blokir", 15),

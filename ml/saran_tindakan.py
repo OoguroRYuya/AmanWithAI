@@ -83,6 +83,8 @@ def susun_saran(
     dst_port_count=0,
     waktu=None,
     durasi_blokir=15,
+    ambang_tinggi=AMBANG_TINGGI,
+    ambang_sedang=AMBANG_SEDANG,
 ):
     """
     Menyusun narasi saran tindakan untuk satu hasil deteksi.
@@ -97,6 +99,8 @@ def susun_saran(
         Tingkat kepercayaan klasifikasi, rentang 0 sampai 1
     durasi_blokir : int
         Usulan lama pemblokiran dalam menit
+    ambang_tinggi, ambang_sedang : float
+        Ambang kepercayaan; default AMBANG_TINGGI / AMBANG_SEDANG
 
     Mengembalikan dict berisi judul, tingkat risiko, narasi, dan flag
     apakah mitigasi otomatis disarankan.
@@ -143,10 +147,10 @@ def susun_saran(
     # Tingkat kepercayaan menentukan apakah sistem menyarankan mitigasi
     # otomatis atau cukup pemantauan. Ini mengurangi risiko pemblokiran
     # alamat IP yang sebenarnya sah.
-    if confidence >= AMBANG_TINGGI:
+    if confidence >= ambang_tinggi:
         tindakan = t["tindakan_tinggi"].format(**konteks)
         otomatis = True
-    elif confidence >= AMBANG_SEDANG:
+    elif confidence >= ambang_sedang:
         tindakan = t["tindakan_sedang"].format(**konteks)
         otomatis = False
     else:
