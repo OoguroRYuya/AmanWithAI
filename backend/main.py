@@ -374,6 +374,7 @@ async def status():
         "ambang_sedang": cfg.AMBANG_SEDANG,
         "min_flow_insiden": cfg.MIN_FLOW_INSIDEN,
         "ambang_rasio_serangan": cfg.AMBANG_RASIO_SERANGAN,
+        "ambang_conf_blokir": cfg.AMBANG_CONF_BLOKIR,
         "allowlist": sorted(cfg.ALLOWLIST),
         "sumber_data": cfg.SUMBER,
         "estimasi_paket_paksa": cfg.ESTIMASI_PAKET_PAKSA,

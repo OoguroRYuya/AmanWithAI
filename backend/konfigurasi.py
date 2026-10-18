@@ -56,12 +56,16 @@ DURASI_BLOKIR_MENIT = int(os.getenv("DURASI_BLOKIR_MENIT", "15"))
 # Ambang tingkat kepercayaan: >= TINGGI -> mitigasi otomatis,
 # SEDANG..TINGGI -> menunggu persetujuan, < SEDANG -> hanya dicatat
 AMBANG_TINGGI = float(os.getenv("AMBANG_TINGGI", "0.90"))
-AMBANG_SEDANG = float(os.getenv("AMBANG_SEDANG", "0.70"))
+AMBANG_SEDANG = float(os.getenv("AMBANG_SEDANG", "0.50"))
 
 # Insiden dengan flow serangan lebih sedikit dari ini diabaikan
 MIN_FLOW_INSIDEN = int(os.getenv("MIN_FLOW_INSIDEN", "20"))
 # Sumber hanya diblokir bila >= sekian bagian flow-nya berkelas serangan
 AMBANG_RASIO_SERANGAN = float(os.getenv("AMBANG_RASIO_SERANGAN", "0.80"))
+# Pemicu blokir otomatis per sumber: confidence rata-rata flow serangan
+# sumber yang lolos gerbang rasio. AMBANG_SEDANG..ini -> menunggu
+# persetujuan, di bawah AMBANG_SEDANG -> hanya dicatat.
+AMBANG_CONF_BLOKIR = float(os.getenv("AMBANG_CONF_BLOKIR", "0.70"))
 
 # Alamat yang tidak boleh diblokir otomatis: gateway VyOS tiap subnet,
 # Collector, dan host backend (IP Windows dilihat dari VM GNS3)

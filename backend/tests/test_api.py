@@ -92,11 +92,25 @@ def test_ingest_path_di_luar_folder_ditolak(klien):
     assert r.status_code == 403
 
 
-def test_setujui_dan_tolak(klien, insiden):
-    menunggu = klien.get("/api/persetujuan").json()["data"]
-    if len(menunggu) < 2:
-        pytest.skip("fixture tidak menghasilkan dua insiden menunggu persetujuan")
-    a, b = menunggu[0], menunggu[1]
+def tunggu_persetujuan(klien, minimal, batas=60):
+    akhir = time.time() + batas
+    while time.time() < akhir:
+        menunggu = klien.get("/api/persetujuan").json()["data"]
+        if len(menunggu) >= minimal:
+            return menunggu
+        time.sleep(0.2)
+    raise AssertionError(f"kurang dari {minimal} insiden menunggu persetujuan")
+
+
+def test_setujui_dan_tolak(klien, insiden, monkeypatch):
+    import konfigurasi as cfg
+    # Dengan ambang default seluruh insiden fixture diblokir otomatis;
+    # ambang > 1 memaksa sumbernya masuk antrean persetujuan
+    monkeypatch.setattr(cfg, "AMBANG_CONF_BLOKIR", 1.01)
+    r = klien.post("/api/ingest", content=FIXTURE_CSV.read_bytes(),
+                   headers={"Content-Type": "text/csv"})
+    assert r.status_code == 202
+    a, b = tunggu_persetujuan(klien, 2)[:2]
 
     r = klien.post(f"/api/mitigasi/setujui/{a['id']}")
     assert r.status_code == 200

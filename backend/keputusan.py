@@ -11,13 +11,18 @@ Aturan untuk setiap insiden dalam satu jendela:
         rasio_serangan = flow serangan sumber / seluruh flow sumber
         conf_rata      = rata-rata confidence flow serangan sumber
       sumber LOLOS bila rasio >= AMBANG_RASIO_SERANGAN, conf_rata >=
-      AMBANG_TINGGI, dan tidak ada di ALLOWLIST
+      AMBANG_CONF_BLOKIR, dan tidak ada di ALLOWLIST
     - status insiden:
-        confidence >= AMBANG_TINGGI dan ada sumber lolos -> blokir_otomatis
-        confidence >= AMBANG_SEDANG dan ada kandidat     -> menunggu_persetujuan
-        selain itu                                        -> dicatat
+        ada sumber lolos  -> blokir_otomatis
+        ada kandidat      -> menunggu_persetujuan
+        selain itu        -> dicatat
       kandidat persetujuan = sumber dengan rasio >= AMBANG_RASIO_SERANGAN
-      yang tidak ada di ALLOWLIST (ambang confidence diserahkan ke admin)
+      yang tidak ada di ALLOWLIST dan AMBANG_SEDANG <= conf_rata <
+      AMBANG_CONF_BLOKIR; di bawah AMBANG_SEDANG sumber hanya dicatat
+
+Pemicu blokir sengaja per sumber, bukan rata-rata confidence insiden:
+rata-rata insiden flood dihitung atas ratusan sumber palsu sehingga hampir
+tidak pernah mencapai AMBANG_TINGGI, padahal tiap sumbernya jelas serangan.
 
 Gerbang rasio inilah yang mencegah klien sah terblokir: klien normal
 mengirim banyak flow normal, sehingga beberapa salah klasifikasi tetap
@@ -81,7 +86,7 @@ class HasilKeputusan:
         return [k for k in self.keputusan if k.status == MENUNGGU_PERSETUJUAN]
 
 
-def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_tinggi, allowlist):
+def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, allowlist):
     stat = per_sumber.get(ip, {})
     total = stat.get("total", 0)
     serangan = sum(stat.get(k, 0) for k in KELAS_SERANGAN)
@@ -92,8 +97,8 @@ def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_tinggi, allowlist):
         alasan = "ada di allowlist"
     elif rasio < ambang_rasio:
         alasan = f"rasio serangan {rasio:.2f} < {ambang_rasio:.2f}"
-    elif conf < ambang_tinggi:
-        alasan = f"confidence rata-rata {conf:.2f} < {ambang_tinggi:.2f}"
+    elif conf < ambang_conf:
+        alasan = f"confidence rata-rata {conf:.2f} < {ambang_conf:.2f}"
     else:
         alasan = "lolos semua gerbang"
 
@@ -107,15 +112,20 @@ def _ringkas_ip(daftar):
     return f"{daftar[0]} dan {len(daftar) - 1} alamat lain"
 
 
-def _saran(ins, status, ip_utama, ambang_tinggi, ambang_sedang, durasi_blokir):
+def _saran(ins, status, evals_utama, ambang_conf, ambang_sedang, durasi_blokir):
     # Narasi menyebut IP yang diblokir/diusulkan, bukan sumber pertama
-    # menurut urutan string (yang bisa saja klien salah klasifikasi)
+    # menurut urutan string (yang bisa saja klien salah klasifikasi).
+    # Tingkat tindakan mengikuti confidence sumber tersebut dan ambang
+    # blokir, sejalan dengan gerbang per sumber.
     waktu = ins.window.replace("T", " ")
+    ip_utama = [e.ip for e in evals_utama]
+    confidence = (sum(e.conf_rata for e in evals_utama) / len(evals_utama)
+                  if evals_utama else ins.confidence)
     saran = susun_saran(
         kelas=ins.kelas,
         src_ip=_ringkas_ip(ip_utama or ins.sumber),
         dst_ip=_ringkas_ip(ins.tujuan),
-        confidence=ins.confidence,
+        confidence=confidence,
         packet_count=ins.packet_total,
         byte_count=ins.byte_total,
         # laju rata-rata insiden sepanjang satu jendela
@@ -123,8 +133,8 @@ def _saran(ins, status, ip_utama, ambang_tinggi, ambang_sedang, durasi_blokir):
         dst_port_count=ins.dst_port_maks,
         waktu=waktu,
         durasi_blokir=durasi_blokir,
-        ambang_tinggi=ambang_tinggi,
-        ambang_sedang=ambang_sedang,
+        ambang_tinggi=ambang_conf,
+        ambang_sedang=min(ambang_sedang, ambang_conf),
     )
     otomatis = status == BLOKIR_OTOMATIS
     if saran.get("mitigasi_otomatis") and not otomatis:
@@ -142,7 +152,7 @@ def putuskan(
     hasil: HasilWindow,
     min_flow=None,
     ambang_rasio=None,
-    ambang_tinggi=None,
+    ambang_conf_blokir=None,
     ambang_sedang=None,
     allowlist=None,
     durasi_blokir=None,
@@ -150,7 +160,7 @@ def putuskan(
     """Menerapkan gerbang D3 pada seluruh insiden satu jendela."""
     min_flow = cfg.MIN_FLOW_INSIDEN if min_flow is None else min_flow
     ambang_rasio = cfg.AMBANG_RASIO_SERANGAN if ambang_rasio is None else ambang_rasio
-    ambang_tinggi = cfg.AMBANG_TINGGI if ambang_tinggi is None else ambang_tinggi
+    ambang_conf = cfg.AMBANG_CONF_BLOKIR if ambang_conf_blokir is None else ambang_conf_blokir
     ambang_sedang = cfg.AMBANG_SEDANG if ambang_sedang is None else ambang_sedang
     allowlist = cfg.ALLOWLIST if allowlist is None else set(allowlist)
     durasi_blokir = cfg.DURASI_BLOKIR_MENIT if durasi_blokir is None else durasi_blokir
@@ -163,35 +173,33 @@ def putuskan(
             continue
 
         evals = [
-            evaluasi_sumber(ip, hasil.per_sumber, ambang_rasio, ambang_tinggi, allowlist)
+            evaluasi_sumber(ip, hasil.per_sumber, ambang_rasio, ambang_conf, allowlist)
             for ip in ins.sumber
         ]
-        lolos = [e.ip for e in evals if e.lolos]
+        lolos = [e for e in evals if e.lolos]
         kandidat = [
-            e.ip for e in evals
+            e for e in evals
             if e.rasio_serangan >= ambang_rasio and e.ip not in allowlist
+            and ambang_sedang <= e.conf_rata < ambang_conf
         ]
 
-        if ins.confidence >= ambang_tinggi and lolos:
+        if lolos:
             status = BLOKIR_OTOMATIS
             alasan = f"{len(lolos)} dari {len(evals)} sumber lolos gerbang"
-            ip_blokir, ip_kandidat = lolos, []
-        elif ins.confidence >= ambang_sedang and kandidat:
+            utama = lolos
+            ip_blokir, ip_kandidat = [e.ip for e in lolos], []
+        elif kandidat:
             status = MENUNGGU_PERSETUJUAN
-            if ins.confidence >= ambang_tinggi:
-                alasan = "confidence tinggi, tetapi tidak ada sumber yang lolos semua gerbang"
-            else:
-                alasan = (
-                    f"confidence {ins.confidence:.2f} di antara "
-                    f"{ambang_sedang:.2f} dan {ambang_tinggi:.2f}"
-                )
-            ip_blokir, ip_kandidat = [], kandidat
+            alasan = (
+                f"{len(kandidat)} sumber lolos gerbang rasio dengan confidence "
+                f"rata-rata di antara {ambang_sedang:.2f} dan {ambang_conf:.2f}"
+            )
+            utama = kandidat
+            ip_blokir, ip_kandidat = [], [e.ip for e in kandidat]
         else:
             status = DICATAT
-            if ins.confidence < ambang_sedang:
-                alasan = f"confidence {ins.confidence:.2f} < {ambang_sedang:.2f}"
-            else:
-                alasan = "tidak ada sumber yang layak diblokir"
+            alasan = "tidak ada sumber yang layak diblokir"
+            utama = []
             ip_blokir, ip_kandidat = [], []
 
         keluaran.keputusan.append(KeputusanInsiden(
@@ -201,8 +209,7 @@ def putuskan(
             ip_blokir=ip_blokir,
             ip_kandidat=ip_kandidat,
             evaluasi_sumber=evals,
-            saran=_saran(ins, status, ip_blokir or ip_kandidat,
-                         ambang_tinggi, ambang_sedang, durasi_blokir),
+            saran=_saran(ins, status, utama, ambang_conf, ambang_sedang, durasi_blokir),
         ))
 
     return keluaran
