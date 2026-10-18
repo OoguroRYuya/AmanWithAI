@@ -45,3 +45,13 @@ def model():
         pytest.skip("model_terbaik.pkl tidak tersedia")
     import joblib
     return joblib.load(MODEL_PATH)
+
+
+@pytest.fixture(scope="session")
+def klien():
+    from fastapi.testclient import TestClient
+    import main
+    # Satu TestClient untuk seluruh sesi uji (test_api dan test_ws):
+    # antrean asyncio terikat ke event loop pertama yang memakainya
+    with TestClient(main.app) as c:
+        yield c

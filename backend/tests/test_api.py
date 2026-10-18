@@ -3,22 +3,12 @@
 import time
 
 import pytest
-from fastapi.testclient import TestClient
 
 from conftest import FIXTURE_CSV, MODEL_PATH
 
 pytestmark = pytest.mark.skipif(not MODEL_PATH.exists(), reason="model tidak tersedia")
 
 STEMPEL = ("t_window_end", "t_diterima", "t_klasifikasi", "t_mitigasi")
-
-
-@pytest.fixture(scope="module")
-def klien():
-    import main
-    # Satu TestClient untuk seluruh modul: antrean asyncio terikat ke
-    # event loop pertama yang memakainya
-    with TestClient(main.app) as c:
-        yield c
 
 
 def tunggu_antrean(klien, batas=60):

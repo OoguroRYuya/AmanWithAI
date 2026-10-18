@@ -15,6 +15,11 @@ Alur live (fase 2):
     pipeline.proses_csv -> keputusan.putuskan, menyimpan insiden ke riwayat,
     lalu memblokir sumber yang lolos gerbang dalam satu sesi Netmiko.
 
+Umpan real-time (fase 3):
+    Klien WebSocket /ws menerima satu pesan `snapshot`, lalu pesan
+    `trafik`, `insiden`, `mitigasi`, `status`, dan `ping` secara langsung.
+    Endpoint REST tetap dipakai untuk pemuatan awal halaman.
+
 Menjalankan:
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
@@ -34,13 +39,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import konfigurasi as cfg
 import keputusan as kp
 import pipeline
+from ws import KoneksiWS
 
 # Menambahkan folder ml ke path agar modul penelitian dapat diimpor
 sys.path.insert(0, str(cfg.DIR_REPO / "ml"))
@@ -59,6 +65,9 @@ FITUR = [
 MAKS_RIWAYAT = 500
 MAKS_TRAFIK = 240          # 4 jam jendela 60 detik
 MAKS_PERSETUJUAN = 200
+INTERVAL_PING_DETIK = 20
+SNAPSHOT_INSIDEN = 50
+SNAPSHOT_TRAFIK = 60
 
 # Penyimpanan sementara di memori. Untuk penggunaan jangka panjang,
 # sebaiknya diganti dengan basis data.
@@ -68,6 +77,7 @@ antrean_persetujuan: dict = {}      # {id: entri insiden menunggu persetujuan}
 model = None
 label_kelas = None
 mitigator: Optional[ModulMitigasi] = None
+koneksi_ws: Optional[KoneksiWS] = None
 
 # Penghitung id monoton: id tidak berulang meski riwayat dipangkas
 _penghitung_id = itertools.count(1)
@@ -110,6 +120,39 @@ async def _mitigasi(fungsi, *args, **kwargs):
     """Menjalankan aksi mitigator di thread terpisah, satu per satu."""
     async with kunci_mitigasi:
         return await asyncio.to_thread(fungsi, *args, **kwargs)
+
+
+# Siaran WebSocket selalu dipanggil di luar kunci_mitigasi dan di luar
+# asyncio.to_thread, langsung dari event loop
+
+
+async def _siarkan(pesan):
+    if koneksi_ws:
+        await koneksi_ws.broadcast(pesan)
+
+
+async def _siarkan_mitigasi(aksi, ips, oleh):
+    await _siarkan({
+        "tipe": "mitigasi",
+        "aksi": aksi,
+        "ip": list(ips),
+        "oleh": oleh,
+        "dry_run": cfg.DRY_RUN,
+    })
+    await _siarkan_status()
+
+
+async def _siarkan_status():
+    await _siarkan({
+        "tipe": "status",
+        "model_dimuat": model is not None,
+        "dry_run": cfg.DRY_RUN,
+        "ip_terblokir": len(mitigator.terblokir) if mitigator else 0,
+    })
+
+
+async def _siarkan_insiden(entri):
+    await _siarkan({"tipe": "insiden", **entri})
 
 
 # --------------------------------------------------------- pekerja antrean
@@ -159,7 +202,7 @@ async def _proses_window(hw, item, t_klasifikasi):
     t_window_end = item.get("t_window_end") or pipeline.akhir_window(hw.window_epoch).to_pydatetime()
     t_diterima = item["t_diterima"]
 
-    trafik.append({
+    entri_trafik = {
         "window": hw.window,
         "per_kelas": hw.per_kelas,
         "byte_total": hw.byte_total,
@@ -170,7 +213,9 @@ async def _proses_window(hw, item, t_klasifikasi):
         "t_window_end": _iso(t_window_end),
         "t_diterima": _iso(t_diterima),
         "t_klasifikasi": _iso(t_klasifikasi),
-    })
+    }
+    trafik.append(entri_trafik)
+    await _siarkan({"tipe": "trafik", **entri_trafik})
 
     entri_list = []
     for k in kep.keputusan:
@@ -204,6 +249,7 @@ async def _proses_window(hw, item, t_klasifikasi):
 
     # Seluruh IP blokir otomatis dari jendela ini dikirim dalam satu sesi
     ips = kep.ip_blokir
+    diblokir = set()
     if ips and mitigator:
         alasan = ", ".join(sorted({
             f"{e['kelas']} {e['kunci']}" for e in entri_list
@@ -221,6 +267,14 @@ async def _proses_window(hw, item, t_klasifikasi):
 
     for e in entri_list:
         del e["_t_window_end"]
+
+    # Insiden disiarkan setelah mitigasi agar dimitigasi/t_mitigasi sudah final
+    for e in entri_list:
+        await _siarkan_insiden(e)
+    if diblokir:
+        await _siarkan_mitigasi("blokir", sorted(diblokir), "otomatis")
+    else:
+        await _siarkan_status()
 
     log.info(
         f"Jendela {hw.window}: {hw.per_kelas}, {len(kep.keputusan)} insiden "
@@ -264,7 +318,7 @@ async def pemutar_replay():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Memuat model dan menyiapkan modul mitigasi saat server dinyalakan."""
-    global model, label_kelas, mitigator
+    global model, label_kelas, mitigator, koneksi_ws
 
     try:
         import joblib
@@ -286,7 +340,10 @@ async def lifespan(app: FastAPI):
     print(f"Modul mitigasi siap (router={cfg.ROUTER_HOST}, dry_run={cfg.DRY_RUN})")
     print(f"Sumber data: {cfg.SUMBER}, estimasi_paket_paksa={cfg.ESTIMASI_PAKET_PAKSA}")
 
+    koneksi_ws = KoneksiWS()
+
     tugas = [
+        asyncio.create_task(pengirim_ping()),
         # Tugas latar belakang untuk mencabut blokir yang sudah kedaluwarsa
         asyncio.create_task(pencabut_berkala()),
         asyncio.create_task(pekerja_antrean()),
@@ -306,6 +363,8 @@ async def pencabut_berkala():
         await asyncio.sleep(60)
         if mitigator:
             dicabut = await _mitigasi(mitigator.cabut_kedaluwarsa)
+            if dicabut:
+                await _siarkan_mitigasi("cabut", dicabut, "otomatis")
             for ip in dicabut:
                 _catat({
                     "waktu": _iso(_sekarang()),
@@ -313,6 +372,13 @@ async def pencabut_berkala():
                     "src_ip": ip,
                     "keterangan": "Blokir dicabut karena durasi berakhir",
                 })
+
+
+async def pengirim_ping():
+    """Pesan ping berkala agar koneksi WebSocket diam tidak diputus proksi."""
+    while True:
+        await asyncio.sleep(INTERVAL_PING_DETIK)
+        await _siarkan({"tipe": "ping", "waktu": _iso(_sekarang())})
 
 
 # --------------------------------------------------------------- aplikasi
@@ -495,6 +561,8 @@ async def deteksi(flow: FlowInput):
             alasan=kelas,
         )
         entri["dimitigasi"] = berhasil
+        if berhasil:
+            await _siarkan_mitigasi("blokir", [flow.src_ip], "otomatis")
 
     return _catat(entri)
 
@@ -579,6 +647,7 @@ async def blokir_manual(req: MitigasiRequest):
         "src_ip": req.ip,
         "keterangan": f"Diblokir manual selama {req.durasi_menit} menit",
     })
+    await _siarkan_mitigasi("blokir", [req.ip], "manual")
 
     return {"status": "berhasil", "ip": req.ip}
 
@@ -599,6 +668,7 @@ async def cabut_manual(req: MitigasiRequest):
         "src_ip": req.ip,
         "keterangan": "Blokir dicabut manual",
     })
+    await _siarkan_mitigasi("cabut", [req.ip], "manual")
 
     return {"status": "berhasil", "ip": req.ip}
 
@@ -642,6 +712,8 @@ async def setujui(id_insiden: int, durasi_menit: Optional[int] = None):
         t, datetime.fromisoformat(entri["t_window_end"])
     )
     antrean_persetujuan.pop(id_insiden, None)
+    await _siarkan_mitigasi("blokir", diblokir, "manual")
+    await _siarkan_insiden(entri)
     return entri
 
 
@@ -651,7 +723,37 @@ async def tolak(id_insiden: int):
     entri = _ambil_menunggu(id_insiden)
     entri["status"] = "ditolak"
     antrean_persetujuan.pop(id_insiden, None)
+    # Penolakan tidak mengubah firewall, jadi cukup pembaruan insiden
+    await _siarkan_insiden(entri)
     return entri
+
+
+async def _snapshot():
+    insiden = [d for d in riwayat_deteksi if d.get("jenis") == "insiden"]
+    return {
+        "tipe": "snapshot",
+        "status": await status(),
+        "insiden": insiden[:SNAPSHOT_INSIDEN],
+        "terblokir": mitigator.daftar_terblokir() if mitigator else [],
+        "trafik": list(trafik)[-SNAPSHOT_TRAFIK:],
+    }
+
+
+@app.websocket("/ws")
+async def umpan_ws(ws: WebSocket):
+    """
+    Umpan real-time: satu pesan `snapshot` saat tersambung, lalu pesan
+    `trafik` / `insiden` / `mitigasi` / `status` / `ping` dari siaran.
+    Pesan dari klien diabaikan; loop baca hanya untuk mendeteksi putus.
+    """
+    await koneksi_ws.connect(ws, pesan_awal=_snapshot)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        koneksi_ws.disconnect(ws)
 
 
 @app.post("/api/setup-firewall")
