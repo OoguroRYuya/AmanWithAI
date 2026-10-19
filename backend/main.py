@@ -637,9 +637,11 @@ async def blokir_manual(req: MitigasiRequest):
     if not mitigator:
         raise HTTPException(503, "Modul mitigasi belum siap")
 
+    # --- guard: IP di allowlist tidak boleh diblokir (gateway/collector/host) ---
+    if req.ip in cfg.ALLOWLIST:
+        raise HTTPException(400, f"{req.ip} ada di allowlist dan tidak boleh diblokir")
+
     berhasil = await _mitigasi(mitigator.blokir, req.ip, req.durasi_menit, req.alasan)
-    if not berhasil:
-        raise HTTPException(500, f"Gagal memblokir {req.ip}")
 
     _catat({
         "waktu": datetime.now().isoformat(),
