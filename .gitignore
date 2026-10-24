@@ -28,3 +28,8 @@ Thumbs.db
 .env
 *_secret*
 credentials*
+
+BRIEF_*.md
+PROMPT_*.md
+PANDUAN_*.md
+LANJUTAN_*.md
