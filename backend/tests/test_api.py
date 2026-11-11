@@ -4,18 +4,21 @@ import time
 
 import pytest
 
-from conftest import FIXTURE_CSV, MODEL_PATH
+from conftest import ALASAN_MODEL, FIXTURE_CSV, model_cocok
 
-pytestmark = pytest.mark.skipif(not MODEL_PATH.exists(), reason="model tidak tersedia")
+# Hanya untuk tes yang memproses CSV lewat model; tes lain tetap berjalan
+butuh_model = pytest.mark.skipif(not model_cocok(), reason=ALASAN_MODEL)
 
 STEMPEL = ("t_window_end", "t_diterima", "t_klasifikasi", "t_mitigasi")
 
 
 def tunggu_antrean(klien, batas=60):
+    import main
     akhir = time.time() + batas
     while time.time() < akhir:
-        s = klien.get("/api/status").json()
-        if s["antrean"] == 0 and klien.get("/api/trafik").json()["total"] > 0:
+        # qsize() sudah 0 begitu pekerja MENGAMBIL item, padahal insiden dan
+        # blokirnya belum selesai; _unfinished_tasks baru 0 setelah task_done()
+        if main.antrean._unfinished_tasks == 0 and klien.get("/api/trafik").json()["total"] > 0:
             return
         time.sleep(0.2)
     raise AssertionError("antrean tidak selesai diproses")
@@ -33,11 +36,13 @@ def insiden(klien):
     return klien.get("/api/riwayat", params={"jenis": "insiden", "limit": 500}).json()["data"]
 
 
+@butuh_model
 def test_status_dry_run(klien):
     s = klien.get("/api/status").json()
     assert s["model_dimuat"] and s["dry_run"] is True
 
 
+@butuh_model
 def test_ingest_menghasilkan_insiden_terkelompok(klien, insiden):
     assert insiden
     trafik = klien.get("/api/trafik").json()["data"][-1]
@@ -53,6 +58,7 @@ def test_ingest_menghasilkan_insiden_terkelompok(klien, insiden):
             assert e["t_mitigasi"] and e["dimitigasi"]
 
 
+@butuh_model
 def test_allowlist_tidak_diblokir(klien, insiden):
     import konfigurasi as cfg
     terblokir = {d["ip"] for d in klien.get("/api/terblokir").json()["data"]}
@@ -60,6 +66,7 @@ def test_allowlist_tidak_diblokir(klien, insiden):
     assert not any(ip.startswith("192.168.10.") for ip in terblokir)
 
 
+@butuh_model
 def test_id_unik(insiden):
     ids = [e["id"] for e in insiden]
     assert len(ids) == len(set(ids))
@@ -70,6 +77,7 @@ def test_ingest_kosong_ditolak(klien):
     assert r.status_code == 400
 
 
+@butuh_model
 def test_ingest_multipart(klien):
     r = klien.post("/api/ingest", files={"file": ("x.csv", FIXTURE_CSV.read_bytes(), "text/csv")})
     assert r.status_code == 202
@@ -82,6 +90,32 @@ def test_ingest_path_di_luar_folder_ditolak(klien):
     assert r.status_code == 403
 
 
+def catatan_manual(klien, ip):
+    data = klien.get("/api/riwayat", params={"jenis": "mitigasi_manual", "limit": 500}).json()["data"]
+    return [d for d in data if d["src_ip"] == ip]
+
+
+def test_blokir_manual_gagal_di_router_dilaporkan_gagal(klien, monkeypatch):
+    import main
+    # Router menolak (mis. SSH gagal saat DRY_RUN=false): API tidak boleh
+    # mengaku berhasil, mencatat, atau menyiarkan pemblokiran
+    monkeypatch.setattr(main.mitigator, "blokir", lambda ip, durasi, alasan: False)
+    ip = "203.0.113.201"  # TEST-NET-3: di luar rentang IP fixture
+    r = klien.post("/api/mitigasi/blokir", json={"ip": ip, "durasi_menit": 5})
+    assert r.status_code == 500
+    assert catatan_manual(klien, ip) == []
+    terblokir = {d["ip"] for d in klien.get("/api/terblokir").json()["data"]}
+    assert ip not in terblokir
+
+
+def test_blokir_manual_berhasil(klien):
+    ip = "203.0.113.202"
+    r = klien.post("/api/mitigasi/blokir", json={"ip": ip, "durasi_menit": 5})
+    assert r.status_code == 200 and r.json() == {"status": "berhasil", "ip": ip}
+    assert len(catatan_manual(klien, ip)) == 1
+    assert ip in {d["ip"] for d in klien.get("/api/terblokir").json()["data"]}
+
+
 def tunggu_persetujuan(klien, minimal, batas=60):
     akhir = time.time() + batas
     while time.time() < akhir:
@@ -92,6 +126,7 @@ def tunggu_persetujuan(klien, minimal, batas=60):
     raise AssertionError(f"kurang dari {minimal} insiden menunggu persetujuan")
 
 
+@butuh_model
 def test_setujui_dan_tolak(klien, insiden, monkeypatch):
     import konfigurasi as cfg
     # Dengan ambang default seluruh insiden fixture diblokir otomatis;

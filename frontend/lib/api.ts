@@ -3,11 +3,20 @@ import type { Insiden, StatusSistem, Terblokir, Trafik } from "./tipe";
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 export const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000/ws";
 
+// Dikirim saat backend menjawab 401: sesi habis atau belum masuk. Halaman
+// mendengarkannya dan kembali ke layar masuk.
+export const EVENT_SESI_HABIS = "ndr:sesi-habis";
+
 async function minta<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`${API_URL}${path}`, {
     ...init,
+    // cookie sesi HttpOnly dikirim browser; JavaScript tidak pernah membacanya
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
+  if (r.status === 401 && path !== "/api/masuk") {
+    window.dispatchEvent(new Event(EVENT_SESI_HABIS));
+  }
   if (!r.ok) {
     // FastAPI mengirim {"detail": "..."} untuk HTTPException
     let pesan = `${r.status} ${r.statusText}`;
@@ -21,6 +30,15 @@ async function minta<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return r.json() as Promise<T>;
 }
+
+// ------------------------------------------------------------------ sesi
+
+export const cekSesi = () => minta<{ masuk: boolean; dikonfigurasi: boolean }>("/api/sesi");
+
+export const masuk = (password: string) =>
+  minta<{ masuk: boolean }>("/api/masuk", { method: "POST", body: JSON.stringify({ password }) });
+
+export const keluar = () => minta<{ masuk: boolean }>("/api/keluar", { method: "POST" });
 
 // ------------------------------------------------------------------ baca
 

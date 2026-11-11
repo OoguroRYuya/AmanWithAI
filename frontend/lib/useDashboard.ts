@@ -284,11 +284,18 @@ export function useDashboard() {
     [muatTerblokir, toast],
   );
 
+  // Aksi yang langsung mengubah firewall router dikonfirmasi dulu: salah klik
+  // pada Cabut membuka kembali jalur penyerang, pada Blokir memutus klien.
+  const yakin = (pesan: string) => window.confirm(pesan);
+
   const aksi = {
     setujui: (id: number) => jalankan(`Insiden #${id} disetujui`, () => api.setujui(id)),
     tolak: (id: number) => jalankan(`Insiden #${id} ditolak`, () => api.tolak(id)),
-    cabut: (ip: string) => jalankan(`Blokir ${ip} dicabut`, () => api.cabutBlokir(ip)),
-    blokir: (ip: string, durasi: number) =>
+    cabut: async (ip: string) =>
+      yakin(`Cabut blokir ${ip}? Trafik dari alamat ini akan kembali diizinkan router.`) &&
+      jalankan(`Blokir ${ip} dicabut`, () => api.cabutBlokir(ip)),
+    blokir: async (ip: string, durasi: number) =>
+      yakin(`Blokir ${ip} selama ${durasi} menit? Semua trafik dari alamat ini akan di-drop router.`) &&
       jalankan(`${ip} diblokir ${durasi} menit`, () => api.blokirManual(ip, durasi)),
   };
 

@@ -7,7 +7,7 @@ import time
 import pytest
 
 import ws as modul_ws
-from conftest import FIXTURE_CSV, MODEL_PATH
+from conftest import ALASAN_MODEL, FIXTURE_CSV, model_cocok
 
 
 class SoketPalsu:
@@ -56,7 +56,7 @@ def terima_sampai(ws, tipe_dicari, batas=200):
     raise AssertionError(f"tipe {tipe_dicari - terkumpul.keys()} tidak diterima")
 
 
-@pytest.mark.skipif(not MODEL_PATH.exists(), reason="model tidak tersedia")
+@pytest.mark.skipif(not model_cocok(), reason=ALASAN_MODEL)
 def test_snapshot_lalu_umpan_live(klien):
     with klien.websocket_connect("/ws") as ws:
         snap = ws.receive_json()

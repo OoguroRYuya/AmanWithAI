@@ -44,6 +44,8 @@ def _env_path(nama, default):
 ROUTER_HOST = os.getenv("ROUTER_HOST", "192.168.42.198")
 ROUTER_USER = os.getenv("ROUTER_USER", "vyos")
 ROUTER_PASS = os.getenv("ROUTER_PASS", "vyos")
+# Kunci privat SSH untuk router; bila diisi, ROUTER_PASS tidak dipakai
+ROUTER_KEY_FILE = os.getenv("ROUTER_KEY_FILE", "").strip() or None
 
 # Mode dry run mencegah perintah benar-benar dikirim ke router.
 # Ubah menjadi false (DRY_RUN=false) setelah pengujian di lab selesai.
@@ -97,3 +99,38 @@ REPLAY_INTERVAL_DETIK = float(os.getenv("REPLAY_INTERVAL_DETIK", "3"))
 
 # POST /api/ingest dengan {"path": ...} hanya boleh membaca file di sini
 INGEST_DIR = _env_path("INGEST_DIR", "data")
+
+# ------------------------------------------------------------- keamanan
+# Default ketat: rahasia yang kosong membuat fiturnya terkunci, bukan terbuka.
+# Buat nilainya dengan: python keamanan.py (lihat .env.example).
+
+# Hash scrypt password admin. Kosong = tidak ada yang bisa masuk.
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
+# Token kanal mesin (kirim_flow.sh). Kosong = /api/ingest menolak semua.
+INGEST_TOKEN = os.getenv("INGEST_TOKEN", "").strip()
+
+# Satu-satunya origin browser yang boleh memakai API dan WebSocket
+ORIGIN_FRONTEND = os.getenv("ORIGIN_FRONTEND", "http://localhost:3000").strip()
+
+# Dari mana koneksi boleh datang (IP atau jaringan CIDR). Rute admin
+# hanya dari mesin ini; /api/ingest juga dari jaringan host-only VM GNS3.
+ADMIN_SUMBER = _env_list("ADMIN_SUMBER", ["127.0.0.1", "::1"])
+INGEST_SUMBER = _env_list("INGEST_SUMBER", ["127.0.0.1", "::1", "192.168.172.0/24"])
+
+SESI_IDLE_MENIT = int(os.getenv("SESI_IDLE_MENIT", "30"))
+SESI_MAKS_JAM = int(os.getenv("SESI_MAKS_JAM", "8"))
+INGEST_MAKS_MB = int(os.getenv("INGEST_MAKS_MB", "20"))
+
+# Sumber di subnet ini tidak pernah diblokir otomatis, hanya diajukan ke
+# antrean persetujuan: alamat klien/server sah bisa dipalsukan penyerang
+# dalam flood, dan memblokirnya berarti sistem menyerang penggunanya sendiri
+SUBNET_TERLINDUNG = _env_list("SUBNET_TERLINDUNG", ["192.168.10.0/24", "192.168.30.0/24"])
+
+# Pemutus darurat: bila satu jendela hendak memblokir lebih banyak IP baru
+# dari ini, blokir otomatis jendela itu dialihkan ke antrean persetujuan
+MAKS_BLOKIR_BARU_PER_JENDELA = int(os.getenv("MAKS_BLOKIR_BARU_PER_JENDELA", "300"))
+
+# Daftar IP terblokir disimpan di sini agar tidak hilang saat restart
+DIR_STATUS = _env_path("DIR_STATUS", "backend/.state")
+# Log audit tambah-saja: setiap aksi firewall, login, dan akses ditolak
+BERKAS_AUDIT = DIR_STATUS / "audit.jsonl"

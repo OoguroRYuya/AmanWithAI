@@ -13,7 +13,7 @@ Alur pemakaian:
 
 Sepuluh fitur yang dihasilkan:
     duration, packet_count, byte_count, dst_port_count, avg_packet_size,
-    flow_rate, syn_flag_count, unique_src_ip_per_dst, protocol, inter_arrival_time
+    flow_rate, syn_flag_count, unique_src_ip_per_dst, protocol, mean_packet_interval
 """
 
 import argparse
@@ -60,7 +60,7 @@ FEATURE_COLUMNS = [
     "syn_flag_count",
     "unique_src_ip_per_dst",
     "protocol",
-    "inter_arrival_time",
+    "mean_packet_interval",
 ]
 
 
@@ -221,13 +221,14 @@ def hitung_fitur_agregat(df):
     return df
 
 
-def hitung_inter_arrival(df):
+def hitung_interval_paket(df):
     """
-    Menghitung rata-rata selisih waktu kedatangan antar paket dalam satu flow.
+    Estimasi rata-rata interval antarpaket dalam satu flow (mean_packet_interval).
 
-    Dihitung sebagai durasi flow dibagi jumlah paket. Flow dengan satu paket
-    atau kurang diberi nilai 0 karena tidak ada jarak antar paket yang bisa
-    dihitung.
+    NetFlow hanya menyimpan agregat flow (durasi d dan jumlah paket P), bukan
+    waktu tiap paket, sehingga nilainya diestimasi sebagai d / (P - 1): P paket
+    memiliki P - 1 jarak antarpaket. Flow dengan satu paket atau kurang diberi
+    nilai 0 karena tidak ada jarak antarpaket.
     """
     hasil = np.where(
         df["packet_count"] > 1,
@@ -320,8 +321,8 @@ def ekstrak(path_csv, label=None, sertakan_ip=False, estimasi_paksa=False):
     # --- Fitur agregat berbasis jendela waktu ---
     df = hitung_fitur_agregat(df)
 
-    # --- Inter arrival time ---
-    df["inter_arrival_time"] = hitung_inter_arrival(df)
+    # --- Estimasi interval antarpaket ---
+    df["mean_packet_interval"] = hitung_interval_paket(df)
 
     hasil = df[FEATURE_COLUMNS].copy()
     hasil = hasil.replace([np.inf, -np.inf], 0.0).fillna(0.0)

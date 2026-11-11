@@ -13,9 +13,17 @@ interface Props {
   pesanTerakhir: number | null;
   jumlahMenunggu: number;
   jumlahTerblokir: number;
+  onKeluar: () => void;
 }
 
-export default function BarisStatus({ status, koneksi, pesanTerakhir, jumlahMenunggu, jumlahTerblokir }: Props) {
+export default function BarisStatus({
+  status,
+  koneksi,
+  pesanTerakhir,
+  jumlahMenunggu,
+  jumlahTerblokir,
+  onKeluar,
+}: Props) {
   const dryRun = status?.dry_run ?? true;
   return (
     <header className="baris-status">
@@ -66,6 +74,10 @@ export default function BarisStatus({ status, koneksi, pesanTerakhir, jumlahMenu
           </dd>
         </div>
       </dl>
+
+      <button className="tombol kecil" onClick={onKeluar}>
+        Keluar
+      </button>
     </header>
   );
 }

@@ -611,3 +611,24 @@ input.salah {
 .toast-galat {
   border-left-color: var(--status-kritis);
 }
+
+/* ------------------------------------------------------- layar masuk */
+
+.layar-masuk {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.kartu-masuk {
+  width: min(400px, 100%);
+  display: grid;
+  gap: 12px;
+}
+.kartu-masuk h1 {
+  margin: 0;
+}
+.kartu-masuk label {
+  font-size: 13px;
+  color: var(--tinta-2);
+}

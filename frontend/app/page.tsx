@@ -1,16 +1,65 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import AntreanPersetujuan from "@/components/AntreanPersetujuan";
 import BarisStatus from "@/components/BarisStatus";
 import DaftarTerblokir from "@/components/DaftarTerblokir";
 import DetailInsiden from "@/components/DetailInsiden";
 import GrafikTrafik from "@/components/GrafikTrafik";
+import Masuk from "@/components/Masuk";
 import TabelInsiden from "@/components/TabelInsiden";
+import * as api from "@/lib/api";
 import { useDashboard } from "@/lib/useDashboard";
 
-export default function Dashboard() {
+type Sesi = { t: "memeriksa" } | { t: "galat"; pesan: string } | { t: "keluar"; dikonfigurasi: boolean } | { t: "masuk" };
+
+// Dashboard (dan WebSocket-nya) hanya dipasang selama sesi admin valid;
+// saat sesi habis atau admin keluar, komponennya dilepas dan WS ditutup.
+export default function Halaman() {
+  const [sesi, setSesi] = useState<Sesi>({ t: "memeriksa" });
+
+  const periksa = useCallback(() => {
+    setSesi({ t: "memeriksa" });
+    api
+      .cekSesi()
+      .then((s) => setSesi(s.masuk ? { t: "masuk" } : { t: "keluar", dikonfigurasi: s.dikonfigurasi }))
+      .catch((e: Error) => setSesi({ t: "galat", pesan: e.message }));
+  }, []);
+
+  useEffect(() => {
+    periksa();
+    window.addEventListener(api.EVENT_SESI_HABIS, periksa);
+    return () => window.removeEventListener(api.EVENT_SESI_HABIS, periksa);
+  }, [periksa]);
+
+  const keluar = useCallback(() => {
+    api.keluar().finally(periksa);
+  }, [periksa]);
+
+  switch (sesi.t) {
+    case "memeriksa":
+      return <main className="layar-masuk kosong">Memeriksa sesi…</main>;
+    case "galat":
+      return (
+        <main className="layar-masuk">
+          <div className="kartu kartu-masuk" role="alert">
+            <h1>Backend tidak dapat dihubungi</h1>
+            <p className="redup">{sesi.pesan}</p>
+            <button className="tombol" onClick={periksa}>
+              Coba lagi
+            </button>
+          </div>
+        </main>
+      );
+    case "keluar":
+      return <Masuk dikonfigurasi={sesi.dikonfigurasi} onBerhasil={periksa} />;
+    case "masuk":
+      return <Dashboard onKeluar={keluar} />;
+  }
+}
+
+function Dashboard({ onKeluar }: { onKeluar: () => void }) {
   const { keadaan, toasts, aksi } = useDashboard();
   const [dipilih, setDipilih] = useState<number | null>(null);
 
@@ -33,6 +82,7 @@ export default function Dashboard() {
         pesanTerakhir={keadaan.pesanTerakhir}
         jumlahMenunggu={menunggu.length}
         jumlahTerblokir={keadaan.terblokir.length}
+        onKeluar={onKeluar}
       />
 
       <GrafikTrafik trafik={keadaan.trafik} />

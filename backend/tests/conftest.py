@@ -1,15 +1,10 @@
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
 import pytest
-
-# Dipasang SEBELUM konfigurasi diimpor (load_dotenv tidak menimpa env yang
-# sudah ada), supaya pengujian tidak pernah mengirim perintah ke router
-# meski backend/.env berisi DRY_RUN=false
-os.environ["DRY_RUN"] = "true"
-os.environ["SUMBER"] = "ingest"
 
 DIR_TES = Path(__file__).parent
 DIR_BACKEND = DIR_TES.parent
@@ -17,6 +12,24 @@ DIR_REPO = DIR_BACKEND.parent
 
 sys.path.insert(0, str(DIR_BACKEND))
 sys.path.insert(0, str(DIR_REPO / "ml"))
+
+import keamanan as km  # noqa: E402
+
+PASSWORD_UJI = "password-uji-ndr-12345"
+TOKEN_UJI = "token-ingest-uji"
+
+# Dipasang SEBELUM konfigurasi diimpor (load_dotenv tidak menimpa env yang
+# sudah ada), supaya pengujian tidak pernah mengirim perintah ke router
+# meski backend/.env berisi DRY_RUN=false
+os.environ["DRY_RUN"] = "true"
+os.environ["SUMBER"] = "ingest"
+os.environ["ADMIN_PASSWORD_HASH"] = km.buat_hash(PASSWORD_UJI)
+os.environ["INGEST_TOKEN"] = TOKEN_UJI
+# TestClient memakai host peer "testclient"
+os.environ["ADMIN_SUMBER"] = "127.0.0.1,::1,testclient"
+os.environ["INGEST_SUMBER"] = "127.0.0.1,::1,testclient"
+# Status blokir tiap sesi uji di folder sementara, tidak bocor antar sesi
+os.environ["DIR_STATUS"] = tempfile.mkdtemp(prefix="ndr_status_uji_")
 
 import ekstraksi_fitur as ef  # noqa: E402
 
@@ -39,10 +52,21 @@ def bingkai(baris):
     return pd.DataFrame(baris)
 
 
+def model_cocok():
+    """True bila model ada DAN dilatih dengan fitur ekstraktor sekarang."""
+    if not MODEL_PATH.exists():
+        return False
+    import joblib
+    return list(getattr(joblib.load(MODEL_PATH), "feature_names_in_", [])) == ef.FEATURE_COLUMNS
+
+
+ALASAN_MODEL = "model tidak ada atau belum dilatih ulang dengan fitur ekstraktor sekarang"
+
+
 @pytest.fixture(scope="session")
 def model():
-    if not MODEL_PATH.exists():
-        pytest.skip("model_terbaik.pkl tidak tersedia")
+    if not model_cocok():
+        pytest.skip(ALASAN_MODEL)
     import joblib
     return joblib.load(MODEL_PATH)
 
@@ -52,6 +76,9 @@ def klien():
     from fastapi.testclient import TestClient
     import main
     # Satu TestClient untuk seluruh sesi uji (test_api dan test_ws):
-    # antrean asyncio terikat ke event loop pertama yang memakainya
-    with TestClient(main.app) as c:
+    # antrean asyncio terikat ke event loop pertama yang memakainya.
+    # Token ingest dipasang sebagai header bawaan; sesi admin lewat login.
+    with TestClient(main.app, headers={"Authorization": f"Bearer {TOKEN_UJI}"}) as c:
+        r = c.post("/api/masuk", json={"password": PASSWORD_UJI})
+        assert r.status_code == 200, r.text
         yield c

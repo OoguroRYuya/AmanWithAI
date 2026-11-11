@@ -33,3 +33,6 @@ BRIEF_*.md
 PROMPT_*.md
 PANDUAN_*.md
 LANJUTAN_*.md
+
+# --- Status runtime backend (daftar IP terblokir) ---
+backend/.state/

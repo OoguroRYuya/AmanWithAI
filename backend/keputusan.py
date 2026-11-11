@@ -28,6 +28,13 @@ Gerbang rasio inilah yang mencegah klien sah terblokir: klien normal
 mengirim banyak flow normal, sehingga beberapa salah klasifikasi tetap
 membuat rasionya jauh di bawah ambang. Sumber flood palsu hanya mengirim
 flow serangan sehingga rasionya 1.0.
+
+Gerbang rasio tidak menolong klien yang sedang diam di suatu jendela:
+penyerang yang memalsukan alamatnya membuat rasionya 1.0. Karena itu
+sumber di SUBNET_TERLINDUNG (klien dan server sah) tidak pernah diblokir
+otomatis; bila lolos gerbang rasio dengan confidence >= AMBANG_SEDANG,
+sumber itu diajukan ke antrean persetujuan. Sumber yang bukan alamat
+IPv4 host valid tidak pernah lolos.
 """
 
 import sys
@@ -35,11 +42,13 @@ from dataclasses import asdict, dataclass, field
 from typing import List
 
 import konfigurasi as cfg
+from keamanan import di_subnet
 from pipeline import HasilWindow, Insiden, KELAS_SERANGAN
 
 sys.path.insert(0, str(cfg.DIR_REPO / "ml"))
 
 import ekstraksi_fitur as ef  # noqa: E402
+from mitigasi import ip_aman  # noqa: E402
 from saran_tindakan import susun_saran  # noqa: E402
 
 BLOKIR_OTOMATIS = "blokir_otomatis"
@@ -100,21 +109,38 @@ class HasilKeputusan:
         return [k for k in self.keputusan if k.status == MENUNGGU_PERSETUJUAN]
 
 
-def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, ambang_sedang, allowlist):
+ALASAN_TERLINDUNG = "subnet terlindungi: hanya lewat persetujuan admin"
+
+
+def _ip_valid(ip):
+    try:
+        ip_aman(ip)
+        return True
+    except ValueError:
+        return False
+
+
+def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, ambang_sedang, allowlist,
+                    terlindung=False):
     stat = per_sumber.get(ip, {})
     total = stat.get("total", 0)
     serangan = sum(stat.get(k, 0) for k in KELAS_SERANGAN)
     rasio = serangan / total if total else 0.0
     conf = stat.get("conf_serangan", 0.0) / serangan if serangan else 0.0
+    valid = _ip_valid(ip)
 
     # Semua perbandingan ambang memakai _memenuhi (tak dibulatkan + toleransi)
     # supaya gerbang blokir dan antrean konsisten di nilai batas.
     if ip in allowlist:
         alasan = "ada di allowlist"
+    elif not valid:
+        alasan = "bukan alamat IPv4 host yang valid"
     elif not _memenuhi(rasio, ambang_rasio):
         alasan = f"rasio serangan {rasio:.2f} < {ambang_rasio:.2f}"
     elif not _memenuhi(conf, ambang_conf):
         alasan = f"confidence rata-rata {conf:.2f} < {ambang_conf:.2f}"
+    elif terlindung:
+        alasan = ALASAN_TERLINDUNG
     else:
         alasan = "lolos semua gerbang"
 
@@ -122,14 +148,39 @@ def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, ambang_sedang, al
     # Kandidat antrean: lolos gerbang rasio & bukan allowlist, confidence di
     # [ambang_sedang, ambang_conf). Pakai conf TAK dibulatkan yang sama dengan
     # gerbang blokir, jadi conf = 0,70 pasti blokir (bukan jatuh ke "dicatat").
+    # Sumber di subnet terlindungi dengan confidence >= ambang_conf juga
+    # menjadi kandidat, karena ia tidak pernah diblokir otomatis.
     kandidat = (
         not lolos
+        and valid
         and ip not in allowlist
         and _memenuhi(rasio, ambang_rasio)
         and _memenuhi(conf, ambang_sedang)
-        and not _memenuhi(conf, ambang_conf)
+        and (terlindung or not _memenuhi(conf, ambang_conf))
     )
     return EvaluasiSumber(ip, round(rasio, 4), round(conf, 4), lolos, kandidat, alasan)
+
+
+def pemutus_darurat(hasil, sudah_terblokir, batas):
+    """
+    Bila jendela ini hendak memblokir lebih dari `batas` IP BARU, seluruh
+    blokir otomatisnya dialihkan ke antrean persetujuan (gagal dengan aman:
+    lonjakan seperti ini lebih mungkin data yang diracun atau salah
+    klasifikasi massal daripada sesuatu yang perlu diblokir tanpa manusia).
+    Mengubah `hasil` di tempat; mengembalikan jumlah IP baru bila pemutus
+    terpicu, selain itu 0.
+    """
+    baru = [ip for ip in hasil.ip_blokir if ip not in sudah_terblokir]
+    if len(baru) <= batas:
+        return 0
+    for k in hasil.keputusan:
+        if k.status == BLOKIR_OTOMATIS:
+            k.status = MENUNGGU_PERSETUJUAN
+            k.ip_kandidat, k.ip_blokir = k.ip_blokir, []
+            k.alasan = (f"pemutus darurat: {len(baru)} IP baru dalam satu jendela "
+                        f"melebihi batas {batas}; perlu persetujuan admin")
+            k.saran["mitigasi_otomatis"] = False
+    return len(baru)
 
 
 def _ringkas_ip(daftar):
@@ -182,6 +233,7 @@ def putuskan(
     ambang_sedang=None,
     allowlist=None,
     durasi_blokir=None,
+    subnet_terlindung=None,
 ):
     """Menerapkan gerbang D3 pada seluruh insiden satu jendela."""
     min_flow = cfg.MIN_FLOW_INSIDEN if min_flow is None else min_flow
@@ -190,6 +242,7 @@ def putuskan(
     ambang_sedang = cfg.AMBANG_SEDANG if ambang_sedang is None else ambang_sedang
     allowlist = cfg.ALLOWLIST if allowlist is None else set(allowlist)
     durasi_blokir = cfg.DURASI_BLOKIR_MENIT if durasi_blokir is None else durasi_blokir
+    subnet_terlindung = cfg.SUBNET_TERLINDUNG if subnet_terlindung is None else subnet_terlindung
 
     keluaran = HasilKeputusan(window=hasil.window)
 
@@ -198,9 +251,10 @@ def putuskan(
             keluaran.jumlah_diabaikan += 1
             continue
 
+        terlindung = {ip for ip in ins.sumber if di_subnet(ip, subnet_terlindung)}
         evals = [
             evaluasi_sumber(ip, hasil.per_sumber, ambang_rasio, ambang_conf,
-                            ambang_sedang, allowlist)
+                            ambang_sedang, allowlist, terlindung=ip in terlindung)
             for ip in ins.sumber
         ]
         lolos = [e for e in evals if e.lolos]
@@ -213,10 +267,16 @@ def putuskan(
             ip_blokir, ip_kandidat = [e.ip for e in lolos], []
         elif kandidat:
             status = MENUNGGU_PERSETUJUAN
-            alasan = (
-                f"{len(kandidat)} sumber lolos gerbang rasio dengan confidence "
-                f"rata-rata di antara {ambang_sedang:.2f} dan {ambang_conf:.2f}"
-            )
+            n_lindung = sum(e.ip in terlindung for e in kandidat)
+            if n_lindung == len(kandidat):
+                alasan = f"{len(kandidat)} sumber di subnet terlindungi, perlu persetujuan admin"
+            else:
+                alasan = (
+                    f"{len(kandidat)} sumber lolos gerbang rasio dengan confidence "
+                    f"rata-rata di antara {ambang_sedang:.2f} dan {ambang_conf:.2f}"
+                )
+                if n_lindung:
+                    alasan += f" (termasuk {n_lindung} di subnet terlindungi)"
             utama = kandidat
             ip_blokir, ip_kandidat = [], [e.ip for e in kandidat]
         else:

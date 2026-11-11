@@ -15,7 +15,10 @@ Catatan platform:
     gunakan kumpulan perintah pada CISCO_COMMANDS.
 """
 
+import ipaddress
+import json
 import logging
+import os
 from datetime import datetime, timedelta
 
 logging.basicConfig(
@@ -30,29 +33,108 @@ DEVICE_TYPE = "vyos"
 # Nama firewall group pada VyOS yang menampung daftar IP terblokir
 FIREWALL_GROUP = "BLOKIR_NDR"
 
+# Batas lama satu pemblokiran (menit)
+MAKS_DURASI_MENIT = 1440
+
+
+def ip_aman(ip):
+    """
+    Mengembalikan IP dalam bentuk baku bila ia SATU alamat IPv4 host yang
+    wajar diblokir; selain itu ValueError.
+
+    Setiap IP divalidasi di sini, tepat sebelum dirangkai menjadi perintah
+    router, sehingga teks seperti "1.2.3.4\\ndelete firewall ..." (injeksi
+    perintah) atau rentang "0.0.0.0-255.255.255.255" tidak pernah sampai
+    ke VyOS, dari mana pun asalnya (API, pipeline, berkas status).
+    """
+    if not isinstance(ip, str):
+        raise ValueError("IP harus berupa teks")
+    alamat = ipaddress.IPv4Address(ip.strip())
+    if (alamat.is_unspecified or alamat.is_loopback or alamat.is_multicast
+            or alamat.is_link_local or alamat.is_reserved
+            or alamat == ipaddress.IPv4Address("255.255.255.255")):
+        raise ValueError(f"{alamat} bukan alamat host yang dapat diblokir")
+    return str(alamat)
+
+
+def durasi_aman(durasi_menit):
+    durasi = int(durasi_menit)
+    if not 1 <= durasi <= MAKS_DURASI_MENIT:
+        raise ValueError(f"durasi harus 1 sampai {MAKS_DURASI_MENIT} menit")
+    return durasi
+
 
 class ModulMitigasi:
     """
     Mengelola koneksi ke router dan penerapan aturan pemblokiran.
 
-    Daftar IP yang sedang diblokir disimpan di memori beserta waktu
-    kedaluwarsanya, sehingga pencabutan otomatis dapat dilakukan.
+    Daftar IP yang sedang diblokir disimpan beserta waktu kedaluwarsanya,
+    sehingga pencabutan otomatis dapat dilakukan. Bila `berkas_status`
+    diberikan, daftar itu juga ditulis ke disk dan dimuat ulang saat
+    modul dibuat, agar blokir di router tidak tertinggal selamanya setelah
+    backend dijalankan ulang.
     """
 
-    def __init__(self, host, username, password, port=22, dry_run=False):
+    def __init__(self, host, username, password, port=22, dry_run=False, berkas_status=None,
+                 key_file=None):
         """
         Parameter
         ---------
         dry_run : bool
             Bila True, perintah hanya dicatat di log tanpa benar-benar
             dikirim ke router. Berguna untuk pengujian tanpa risiko.
+        berkas_status : str | Path | None
+            Berkas JSON penyimpan daftar IP terblokir. Gunakan berkas
+            berbeda untuk dry run dan router sungguhan.
+        key_file : str | Path | None
+            Kunci privat SSH untuk login ke router. Bila diisi, login memakai
+            kunci ini (password tidak dipakai).
         """
         self.host = host
         self.username = username
         self.password = password
+        self.key_file = str(key_file) if key_file else None
         self.port = port
         self.dry_run = dry_run
+        self.berkas_status = berkas_status
         self.terblokir = {}  # {ip: waktu_kedaluwarsa}
+        self._muat_status()
+
+    # -------------------------------------------------------------- status
+
+    def _muat_status(self):
+        if not self.berkas_status or not os.path.exists(self.berkas_status):
+            return
+        try:
+            with open(self.berkas_status, encoding="utf-8") as f:
+                data = json.load(f)
+            for ip, waktu in data.items():
+                self.terblokir[ip_aman(ip)] = datetime.fromisoformat(waktu)
+            log.info(f"{len(self.terblokir)} blokir dimuat dari {self.berkas_status}")
+        except Exception as e:
+            log.error(f"Berkas status {self.berkas_status} tidak dapat dibaca: {e}")
+
+    def _simpan_status(self):
+        if not self.berkas_status:
+            return
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.berkas_status)), exist_ok=True)
+            sementara = f"{self.berkas_status}.tmp"
+            with open(sementara, "w", encoding="utf-8") as f:
+                json.dump({ip: w.isoformat() for ip, w in self.terblokir.items()}, f, indent=1)
+            os.replace(sementara, self.berkas_status)
+        except Exception as e:
+            log.error(f"Berkas status {self.berkas_status} gagal ditulis: {e}")
+
+    def _saring_ip(self, ips):
+        """IP valid dalam bentuk baku; yang tidak valid dicatat lalu dibuang."""
+        hasil = []
+        for ip in ips:
+            try:
+                hasil.append(ip_aman(ip))
+            except ValueError as e:
+                log.error(f"IP ditolak, tidak dikirim ke router: {ip!r} ({e})")
+        return sorted(set(hasil))
 
     # ------------------------------------------------------------- koneksi
 
@@ -66,13 +148,18 @@ class ModulMitigasi:
         except ImportError:
             raise RuntimeError("Netmiko belum terpasang. Jalankan: pip install netmiko")
 
+        if self.key_file:
+            # Login dengan kunci SSH; tanpa agent dan tanpa fallback password
+            kredensial = dict(use_keys=True, key_file=self.key_file, allow_agent=False)
+        else:
+            kredensial = dict(password=self.password)
         return ConnectHandler(
             device_type=DEVICE_TYPE,
             host=self.host,
             username=self.username,
-            password=self.password,
             port=self.port,
             timeout=20,
+            **kredensial,
         )
 
     def _jalankan(self, perintah_list, deskripsi):
@@ -138,7 +225,15 @@ class ModulMitigasi:
 
         Pemblokiran bersifat sementara. Waktu kedaluwarsa dicatat agar
         modul dapat mencabutnya secara otomatis melalui cabut_kedaluwarsa().
+        IP atau durasi yang tidak valid ditolak (False) tanpa menghubungi router.
         """
+        try:
+            ip = ip_aman(ip)
+            durasi_menit = durasi_aman(durasi_menit)
+        except ValueError as e:
+            log.error(f"Blokir ditolak: {e}")
+            return False
+
         if ip in self.terblokir:
             log.info(f"{ip} sudah dalam daftar blokir, memperpanjang durasi")
 
@@ -154,11 +249,18 @@ class ModulMitigasi:
 
         if berhasil:
             self.terblokir[ip] = datetime.now() + timedelta(minutes=durasi_menit)
+            self._simpan_status()
 
         return berhasil
 
     def cabut(self, ip):
         """Mencabut pemblokiran satu alamat IP."""
+        try:
+            ip = ip_aman(ip)
+        except ValueError as e:
+            log.error(f"Cabut ditolak: {e}")
+            return False
+
         perintah = [
             f"delete firewall group address-group {FIREWALL_GROUP} address {ip}",
         ]
@@ -167,6 +269,7 @@ class ModulMitigasi:
 
         if berhasil:
             self.terblokir.pop(ip, None)
+            self._simpan_status()
 
         return berhasil
 
@@ -179,8 +282,14 @@ class ModulMitigasi:
         ke router; waktu kedaluwarsanya cukup diperpanjang.
 
         Mengembalikan daftar IP yang kini terblokir (kosong bila gagal).
+        IP yang tidak valid dibuang (dicatat di log), sisanya tetap diproses.
         """
-        ips = sorted(set(ips))
+        try:
+            durasi_menit = durasi_aman(durasi_menit)
+        except ValueError as e:
+            log.error(f"Blokir ditolak: {e}")
+            return []
+        ips = self._saring_ip(ips)
         if not ips:
             return []
 
@@ -204,6 +313,7 @@ class ModulMitigasi:
 
         for ip in ips:
             self.terblokir[ip] = kedaluwarsa
+        self._simpan_status()
         return ips
 
     def cabut_banyak(self, ips):
@@ -211,7 +321,7 @@ class ModulMitigasi:
         Mencabut pemblokiran banyak alamat IP dalam satu sesi SSH.
         Mengembalikan daftar IP yang berhasil dicabut (kosong bila gagal).
         """
-        ips = sorted(set(ips))
+        ips = self._saring_ip(ips)
         if not ips:
             return []
 
@@ -224,6 +334,7 @@ class ModulMitigasi:
 
         for ip in ips:
             self.terblokir.pop(ip, None)
+        self._simpan_status()
         return ips
 
     def cabut_kedaluwarsa(self):

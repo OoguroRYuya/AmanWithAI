@@ -20,8 +20,15 @@ Umpan real-time (fase 3):
     `trafik`, `insiden`, `mitigasi`, `status`, dan `ping` secara langsung.
     Endpoint REST tetap dipakai untuk pemuatan awal halaman.
 
+Keamanan (security by design, lihat keamanan.py):
+    Rute admin (REST dan /ws) ada di router `admin` yang wajib sesi login,
+    hanya dari ADMIN_SUMBER dan origin ORIGIN_FRONTEND (deny by default:
+    rute baru di router itu otomatis terlindungi). /api/ingest memakai
+    token mesin terpisah. Semua IP divalidasi sebelum menyentuh router.
+
 Menjalankan:
-    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn main:app --host 127.0.0.1 --port 8000
+    (saat lab: --host 192.168.172.1 agar kirim_flow.sh dari VM GNS3 sampai)
 
 Dokumentasi API otomatis tersedia di:
     http://localhost:8000/docs
@@ -39,10 +46,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
+import keamanan as km
 import konfigurasi as cfg
 import keputusan as kp
 import pipeline
@@ -51,7 +60,7 @@ from ws import KoneksiWS
 # Menambahkan folder ml ke path agar modul penelitian dapat diimpor
 sys.path.insert(0, str(cfg.DIR_REPO / "ml"))
 
-from mitigasi import ModulMitigasi          # noqa: E402
+from mitigasi import MAKS_DURASI_MENIT, ModulMitigasi, ip_aman  # noqa: E402
 from saran_tindakan import susun_saran      # noqa: E402
 
 log = logging.getLogger("ndr")
@@ -59,7 +68,7 @@ log = logging.getLogger("ndr")
 FITUR = [
     "duration", "packet_count", "byte_count", "dst_port_count",
     "avg_packet_size", "flow_rate", "syn_flag_count",
-    "unique_src_ip_per_dst", "protocol", "inter_arrival_time",
+    "unique_src_ip_per_dst", "protocol", "mean_packet_interval",
 ]
 
 MAKS_RIWAYAT = 500
@@ -89,6 +98,67 @@ antrean: asyncio.Queue = asyncio.Queue()
 kunci_mitigasi = asyncio.Lock()
 
 status_replay = {"aktif": False, "total_window": 0, "terkirim": 0, "selesai": False}
+
+sesi = km.PenyimpanSesi(cfg.SESI_IDLE_MENIT * 60, cfg.SESI_MAKS_JAM * 3600)
+pembatas_masuk = km.PembatasMasuk()
+
+
+# ---------------------------------------------------------------- akses
+
+
+def _host(koneksi):
+    return koneksi.client.host if koneksi.client else None
+
+
+def _origin_asing(koneksi):
+    """Browser selalu mengirim Origin pada POST dan handshake WebSocket;
+    origin selain frontend berarti permintaan dari situs lain (CSRF)."""
+    origin = koneksi.headers.get("origin")
+    return origin is not None and origin != cfg.ORIGIN_FRONTEND
+
+
+def _audit(aksi, oleh, **detail):
+    km.catat_audit(cfg.BERKAS_AUDIT, aksi, oleh, **detail)
+
+
+def _cek_akses_admin(koneksi):
+    """Mengembalikan (kode, pesan) bila ditolak, None bila boleh."""
+    tolak = None
+    if not km.sumber_diizinkan(_host(koneksi), cfg.ADMIN_SUMBER):
+        tolak = 403, "Akses admin hanya dari mesin ini"
+    elif _origin_asing(koneksi):
+        tolak = 403, "Origin tidak diizinkan"
+    elif not cfg.ADMIN_PASSWORD_HASH:
+        return 503, "Login admin belum dikonfigurasi (ADMIN_PASSWORD_HASH)"
+    if tolak:
+        _audit("akses_ditolak", "tidak dikenal", sumber=_host(koneksi),
+               origin=koneksi.headers.get("origin"), path=koneksi.url.path, alasan=tolak[1])
+    return tolak
+
+
+async def wajib_admin(request: Request):
+    tolak = _cek_akses_admin(request)
+    if tolak:
+        raise HTTPException(*tolak)
+    if not sesi.valid(request.cookies.get(km.NAMA_COOKIE)):
+        raise HTTPException(401, "Sesi tidak valid; silakan masuk")
+
+
+async def wajib_ingest(request: Request):
+    if not km.sumber_diizinkan(_host(request), cfg.INGEST_SUMBER):
+        _audit("ingest_ditolak", "tidak dikenal", sumber=_host(request), alasan="sumber")
+        raise HTTPException(403, "Sumber tidak diizinkan mengirim flow")
+    if not cfg.INGEST_TOKEN:
+        raise HTTPException(503, "Ingest belum dikonfigurasi (INGEST_TOKEN)")
+    otorisasi = request.headers.get("authorization", "")
+    token = otorisasi[7:] if otorisasi.lower().startswith("bearer ") else ""
+    if not km.cocok_token(token, cfg.INGEST_TOKEN):
+        _audit("ingest_ditolak", "tidak dikenal", sumber=_host(request), alasan="token")
+        raise HTTPException(401, "Token ingest tidak valid")
+
+
+# Semua rute di router ini wajib sesi admin (deny by default)
+admin = APIRouter(dependencies=[Depends(wajib_admin)])
 
 
 # ---------------------------------------------------------------- utilitas
@@ -195,6 +265,16 @@ async def _proses_item(item):
 
 async def _proses_window(hw, item, t_klasifikasi):
     kep = kp.putuskan(hw)
+    n_baru = kp.pemutus_darurat(
+        kep, set(mitigator.terblokir) if mitigator else set(), cfg.MAKS_BLOKIR_BARU_PER_JENDELA
+    )
+    if n_baru:
+        log.warning(
+            f"Pemutus darurat jendela {hw.window}: {n_baru} IP baru > "
+            f"{cfg.MAKS_BLOKIR_BARU_PER_JENDELA}; dialihkan ke antrean persetujuan"
+        )
+        _audit("pemutus_darurat", "otomatis", window=hw.window, jumlah_ip_baru=n_baru,
+               batas=cfg.MAKS_BLOKIR_BARU_PER_JENDELA)
 
     # Mode ingest: akhir jendela diambil dari stempel waktu flow (jam
     # Collector). Mode replay: saat potongan jendela dikirim pemutar,
@@ -258,6 +338,10 @@ async def _proses_window(hw, item, t_klasifikasi):
         diblokir = set(await _mitigasi(
             mitigator.blokir_banyak, ips, cfg.DURASI_BLOKIR_MENIT, alasan
         ))
+        _audit("blokir", "otomatis", window=hw.window, ip=sorted(diblokir),
+               gagal=sorted(set(ips) - diblokir), durasi_menit=cfg.DURASI_BLOKIR_MENIT,
+               insiden=[e["id"] for e in entri_list if e["status"] == kp.BLOKIR_OTOMATIS],
+               dry_run=cfg.DRY_RUN)
         t_mitigasi = _sekarang()
         for e in entri_list:
             if e["status"] == kp.BLOKIR_OTOMATIS:
@@ -322,7 +406,16 @@ async def lifespan(app: FastAPI):
 
     try:
         import joblib
-        model = joblib.load(cfg.MODEL_PATH)
+        dimuat = joblib.load(cfg.MODEL_PATH)
+        # Model harus dilatih dengan fitur yang sama persis (nama dan urutan)
+        # dengan ekstraktor sekarang; model lama ditolak, bukan dipaksa jalan
+        fitur_model = list(getattr(dimuat, "feature_names_in_", []))
+        if fitur_model != FITUR:
+            raise ValueError(
+                f"fitur model {fitur_model} tidak sama dengan ekstraktor {FITUR}; "
+                "latih ulang model (ml/latih_model.py)"
+            )
+        model = dimuat
         # Daftar kelas diambil langsung dari model agar selalu konsisten
         label_kelas = [str(k) for k in model.classes_]
         print(f"Model dimuat: {cfg.MODEL_PATH.name}")
@@ -335,10 +428,25 @@ async def lifespan(app: FastAPI):
         host=cfg.ROUTER_HOST,
         username=cfg.ROUTER_USER,
         password=cfg.ROUTER_PASS,
+        key_file=cfg.ROUTER_KEY_FILE,
         dry_run=cfg.DRY_RUN,
+        # Berkas terpisah per mode: blokir dry run tidak pernah dianggap ada di router
+        berkas_status=cfg.DIR_STATUS / f"terblokir-{'dryrun' if cfg.DRY_RUN else 'router'}.json",
     )
     print(f"Modul mitigasi siap (router={cfg.ROUTER_HOST}, dry_run={cfg.DRY_RUN})")
     print(f"Sumber data: {cfg.SUMBER}, estimasi_paket_paksa={cfg.ESTIMASI_PAKET_PAKSA}")
+
+    # Gagal tertutup: tanpa rahasia, sistem tidak boleh menyentuh router
+    rahasia_kurang = [n for n in ("ADMIN_PASSWORD_HASH", "INGEST_TOKEN") if not getattr(cfg, n)]
+    if rahasia_kurang and not cfg.DRY_RUN:
+        raise RuntimeError(
+            f"DRY_RUN=false butuh {', '.join(rahasia_kurang)} di backend/.env "
+            "(buat dengan: python keamanan.py)"
+        )
+    for n in rahasia_kurang:
+        print(f"PERINGATAN: {n} kosong; fiturnya terkunci sampai diisi (python keamanan.py)")
+    if not cfg.DRY_RUN and not cfg.ROUTER_KEY_FILE and cfg.ROUTER_PASS == "vyos":
+        print("PERINGATAN: router memakai password bawaan 'vyos'; disarankan ROUTER_KEY_FILE")
 
     koneksi_ws = KoneksiWS()
 
@@ -364,6 +472,7 @@ async def pencabut_berkala():
         if mitigator:
             dicabut = await _mitigasi(mitigator.cabut_kedaluwarsa)
             if dicabut:
+                _audit("cabut", "otomatis", ip=dicabut, alasan="durasi habis", dry_run=cfg.DRY_RUN)
                 await _siarkan_mitigasi("cabut", dicabut, "otomatis")
             for ip in dicabut:
                 _catat({
@@ -390,14 +499,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS diperlukan agar frontend Next.js pada port berbeda dapat mengakses API
+# CORS diperlukan agar frontend Next.js pada port berbeda dapat mengakses API.
+# CORS hanya mengatur siapa yang boleh MEMBACA jawaban; pencegahan CSRF ada
+# di wajib_admin (sesi SameSite=Strict + cek Origin).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[cfg.ORIGIN_FRONTEND],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
+
+
+@app.middleware("http")
+async def header_keamanan(request: Request, call_next):
+    respons = await call_next(request)
+    respons.headers.setdefault("X-Content-Type-Options", "nosniff")
+    respons.headers.setdefault("X-Frame-Options", "DENY")
+    if request.url.path.startswith("/api/"):
+        respons.headers.setdefault("Cache-Control", "no-store")
+    return respons
 
 
 # ----------------------------------------------------------------- skema
@@ -416,19 +537,88 @@ class FlowInput(BaseModel):
     syn_flag_count: int = 0
     unique_src_ip_per_dst: int = 0
     protocol: int = 6
-    inter_arrival_time: float = 0.0
+    mean_packet_interval: float = 0.0
 
 
 class MitigasiRequest(BaseModel):
     ip: str
-    durasi_menit: int = 15
-    alasan: str = ""
+    durasi_menit: int = Field(15, ge=1, le=MAKS_DURASI_MENIT)
+    alasan: str = Field("", max_length=200)
+
+    @field_validator("ip")
+    @classmethod
+    def _ip_valid(cls, v):
+        # satu alamat IPv4 host; tolak rentang, CIDR, teks berisi baris baru
+        return ip_aman(v)
+
+    @field_validator("alasan")
+    @classmethod
+    def _tanpa_karakter_kontrol(cls, v):
+        return "".join(c for c in v if c.isprintable())
+
+
+class MasukRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+
+
+# ------------------------------------------------------------------ sesi
+
+
+def _pasang_cookie(response, token):
+    response.set_cookie(
+        km.NAMA_COOKIE, token, max_age=cfg.SESI_MAKS_JAM * 3600, path="/",
+        httponly=True, samesite="strict",
+    )
+
+
+@app.get("/api/sesi")
+async def cek_sesi(request: Request):
+    """Apakah browser ini sedang masuk (dipakai frontend untuk memilih layar)."""
+    return {
+        "masuk": sesi.valid(request.cookies.get(km.NAMA_COOKIE)),
+        "dikonfigurasi": bool(cfg.ADMIN_PASSWORD_HASH),
+    }
+
+
+@app.post("/api/masuk")
+async def masuk(req: MasukRequest, request: Request, response: Response):
+    tolak = _cek_akses_admin(request)
+    if tolak:
+        raise HTTPException(*tolak)
+    sisa = pembatas_masuk.sisa_kunci()
+    if sisa:
+        raise HTTPException(429, f"Terlalu banyak percobaan; coba lagi dalam {sisa} detik")
+
+    # scrypt sengaja lambat (~0,1 detik): jalankan di luar event loop
+    benar = await asyncio.to_thread(km.cocok_password, req.password, cfg.ADMIN_PASSWORD_HASH)
+    pembatas_masuk.catat(benar)
+    if not benar:
+        log.warning(f"Login admin gagal dari {_host(request)}")
+        _audit("masuk_gagal", "tidak dikenal", sumber=_host(request))
+        raise HTTPException(401, "Password salah")
+
+    _pasang_cookie(response, sesi.buat())
+    log.info(f"Admin masuk dari {_host(request)}")
+    _audit("masuk", "admin", sumber=_host(request))
+    return {"masuk": True}
+
+
+@app.post("/api/keluar")
+async def keluar(request: Request, response: Response):
+    if _origin_asing(request):
+        raise HTTPException(403, "Origin tidak diizinkan")
+    token = request.cookies.get(km.NAMA_COOKIE)
+    if sesi.valid(token):
+        _audit("keluar", "admin", sumber=_host(request))
+    sesi.hapus(token)
+    response.delete_cookie(km.NAMA_COOKIE, path="/", httponly=True, samesite="strict")
+    return {"masuk": False}
 
 
 # --------------------------------------------------------------- endpoint
 
 
-@app.get("/api/status")
+@admin.get("/api/status")
 async def status():
     """Status kesiapan sistem."""
     return {
@@ -452,19 +642,37 @@ async def status():
     }
 
 
-@app.post("/api/ingest", status_code=202)
+async def _baca_terbatas(request):
+    """Membaca badan permintaan, menolak (413) bila melebihi INGEST_MAKS_MB."""
+    batas = cfg.INGEST_MAKS_MB * 1024 * 1024
+    panjang = request.headers.get("content-length", "")
+    if panjang.isdigit() and int(panjang) > batas:
+        raise HTTPException(413, f"CSV melebihi {cfg.INGEST_MAKS_MB} MB")
+    isi = bytearray()
+    async for potong in request.stream():
+        isi += potong
+        if len(isi) > batas:
+            raise HTTPException(413, f"CSV melebihi {cfg.INGEST_MAKS_MB} MB")
+    return bytes(isi)
+
+
+@app.post("/api/ingest", status_code=202, dependencies=[Depends(wajib_ingest)])
 async def ingest(request: Request):
     """
     Menerima satu CSV NetFlow (output nfdump) untuk diproses pekerja.
+    Kanal mesin: wajib `Authorization: Bearer <INGEST_TOKEN>` dari INGEST_SUMBER.
 
     Tiga bentuk masukan:
         - multipart/form-data dengan field `file`
         - application/json {"path": "..."}; path harus berada di INGEST_DIR
-        - badan mentah berisi teks CSV (dipakai kirim_flow.sh:
+        - badan mentah `Content-Type: text/csv` (dipakai kirim_flow.sh:
           curl --data-binary @-), nama file opsional di header X-Nama-File
     """
     t_diterima = _sekarang()
     jenis = request.headers.get("content-type", "")
+    panjang = request.headers.get("content-length", "")
+    if panjang.isdigit() and int(panjang) > cfg.INGEST_MAKS_MB * 1024 * 1024:
+        raise HTTPException(413, f"CSV melebihi {cfg.INGEST_MAKS_MB} MB")
 
     if jenis.startswith("multipart/form-data"):
         form = await request.form()
@@ -485,9 +693,11 @@ async def ingest(request: Request):
             raise HTTPException(404, f"File tidak ditemukan: {p}")
         isi = p.read_bytes()
         nama = p.name
+    elif jenis.startswith("text/csv"):
+        isi = await _baca_terbatas(request)
+        nama = request.headers.get("x-nama-file", "body")[:200]
     else:
-        isi = await request.body()
-        nama = request.headers.get("x-nama-file", "body")
+        raise HTTPException(415, "Content-Type harus text/csv, multipart/form-data, atau application/json")
 
     if not isi.strip():
         raise HTTPException(400, "CSV kosong")
@@ -501,11 +711,13 @@ async def ingest(request: Request):
     return {"diterima": True, "nama": nama, "ukuran_byte": len(isi), "antrean": antrean.qsize()}
 
 
-@app.post("/api/deteksi")
+@admin.post("/api/deteksi")
 async def deteksi(flow: FlowInput):
     """
-    Mengklasifikasikan satu flow record, menyusun saran tindakan, dan
-    menjalankan mitigasi otomatis bila tingkat kepercayaan memadai.
+    Mengklasifikasikan satu flow record dan menyusun saran tindakan, untuk
+    uji/demonstrasi. Endpoint ini TIDAK PERNAH memblokir: fitur flow yang
+    dikirim klien bisa direkayasa, jadi mitigasi hanya lewat pipeline +
+    gerbang D3 atau keputusan admin.
     """
     if model is None:
         raise HTTPException(503, "Model belum dimuat")
@@ -546,28 +758,13 @@ async def deteksi(flow: FlowInput):
         "dst_ip": flow.dst_ip,
         "kelas": kelas,
         "confidence": confidence,
-        "saran": saran,
+        "saran": {**saran, "mitigasi_otomatis": False},
         "dimitigasi": False,
     }
-
-    # Mitigasi otomatis hanya dijalankan bila kelas merupakan serangan
-    # dan tingkat kepercayaan melewati ambang yang ditetapkan.
-    # Alamat pada allowlist (gateway, Collector, backend) tidak pernah diblokir.
-    if saran["mitigasi_otomatis"] and mitigator and flow.src_ip not in cfg.ALLOWLIST:
-        berhasil = await _mitigasi(
-            mitigator.blokir,
-            flow.src_ip,
-            durasi_menit=saran.get("durasi_blokir", 15),
-            alasan=kelas,
-        )
-        entri["dimitigasi"] = berhasil
-        if berhasil:
-            await _siarkan_mitigasi("blokir", [flow.src_ip], "otomatis")
-
     return _catat(entri)
 
 
-@app.get("/api/riwayat")
+@admin.get("/api/riwayat")
 async def riwayat(limit: int = 50, jenis: Optional[str] = None):
     """Riwayat deteksi terbaru. `jenis` opsional, misalnya `insiden`."""
     data = riwayat_deteksi
@@ -576,20 +773,20 @@ async def riwayat(limit: int = 50, jenis: Optional[str] = None):
     return {"total": len(data), "data": data[:limit]}
 
 
-@app.get("/api/trafik")
+@admin.get("/api/trafik")
 async def daftar_trafik(limit: int = 60):
     """Jumlah flow per kelas untuk tiap jendela 60 detik (terbaru di akhir)."""
     data = list(trafik)[-limit:]
     return {"total": len(trafik), "data": data}
 
 
-@app.get("/api/persetujuan")
+@admin.get("/api/persetujuan")
 async def daftar_persetujuan():
     """Insiden yang menunggu persetujuan administrator (terlama di depan)."""
     return {"data": list(antrean_persetujuan.values())}
 
 
-@app.get("/api/ringkasan")
+@admin.get("/api/ringkasan")
 async def ringkasan():
     """Ringkasan statistik untuk ditampilkan pada dashboard."""
     deteksi_saja = [d for d in riwayat_deteksi if d.get("jenis") == "deteksi"]
@@ -623,7 +820,7 @@ async def ringkasan():
     }
 
 
-@app.get("/api/terblokir")
+@admin.get("/api/terblokir")
 async def terblokir():
     """Daftar alamat IP yang sedang diblokir."""
     if not mitigator:
@@ -631,7 +828,7 @@ async def terblokir():
     return {"data": mitigator.daftar_terblokir()}
 
 
-@app.post("/api/mitigasi/blokir")
+@admin.post("/api/mitigasi/blokir")
 async def blokir_manual(req: MitigasiRequest):
     """Memblokir alamat IP secara manual atas persetujuan administrator."""
     if not mitigator:
@@ -642,6 +839,10 @@ async def blokir_manual(req: MitigasiRequest):
         raise HTTPException(400, f"{req.ip} ada di allowlist dan tidak boleh diblokir")
 
     berhasil = await _mitigasi(mitigator.blokir, req.ip, req.durasi_menit, req.alasan)
+    _audit("blokir", "admin", ip=[req.ip], durasi_menit=req.durasi_menit, alasan=req.alasan,
+           berhasil=berhasil, dry_run=cfg.DRY_RUN)
+    if not berhasil:
+        raise HTTPException(500, f"Gagal memblokir {req.ip}")
 
     _catat({
         "waktu": datetime.now().isoformat(),
@@ -654,13 +855,14 @@ async def blokir_manual(req: MitigasiRequest):
     return {"status": "berhasil", "ip": req.ip}
 
 
-@app.post("/api/mitigasi/cabut")
+@admin.post("/api/mitigasi/cabut")
 async def cabut_manual(req: MitigasiRequest):
     """Mencabut pemblokiran alamat IP."""
     if not mitigator:
         raise HTTPException(503, "Modul mitigasi belum siap")
 
     berhasil = await _mitigasi(mitigator.cabut, req.ip)
+    _audit("cabut", "admin", ip=[req.ip], berhasil=berhasil, dry_run=cfg.DRY_RUN)
     if not berhasil:
         raise HTTPException(500, f"Gagal mencabut blokir {req.ip}")
 
@@ -685,8 +887,9 @@ def _ambil_menunggu(id_insiden):
     return entri
 
 
-@app.post("/api/mitigasi/setujui/{id_insiden}")
-async def setujui(id_insiden: int, durasi_menit: Optional[int] = None):
+@admin.post("/api/mitigasi/setujui/{id_insiden}")
+async def setujui(id_insiden: int,
+                  durasi_menit: Optional[int] = Query(None, ge=1, le=MAKS_DURASI_MENIT)):
     """Menyetujui pemblokiran kandidat IP pada insiden yang menunggu persetujuan."""
     if not mitigator:
         raise HTTPException(503, "Modul mitigasi belum siap")
@@ -699,6 +902,9 @@ async def setujui(id_insiden: int, durasi_menit: Optional[int] = None):
         durasi,
         f"disetujui admin: {entri['kelas']} {entri['kunci']}",
     )
+    _audit("setujui", "admin", insiden=id_insiden, ip=diblokir,
+           gagal=sorted(set(entri["ip_kandidat"]) - set(diblokir)), durasi_menit=durasi,
+           berhasil=bool(diblokir), dry_run=cfg.DRY_RUN)
     if not diblokir:
         raise HTTPException(500, f"Gagal memblokir {entri['ip_kandidat']}")
 
@@ -719,12 +925,13 @@ async def setujui(id_insiden: int, durasi_menit: Optional[int] = None):
     return entri
 
 
-@app.post("/api/mitigasi/tolak/{id_insiden}")
+@admin.post("/api/mitigasi/tolak/{id_insiden}")
 async def tolak(id_insiden: int):
     """Menolak pemblokiran; insiden tetap tercatat dengan status ditolak."""
     entri = _ambil_menunggu(id_insiden)
     entri["status"] = "ditolak"
     antrean_persetujuan.pop(id_insiden, None)
+    _audit("tolak", "admin", insiden=id_insiden, ip_kandidat=entri["ip_kandidat"])
     # Penolakan tidak mengubah firewall, jadi cukup pembaruan insiden
     await _siarkan_insiden(entri)
     return entri
@@ -747,7 +954,14 @@ async def umpan_ws(ws: WebSocket):
     Umpan real-time: satu pesan `snapshot` saat tersambung, lalu pesan
     `trafik` / `insiden` / `mitigasi` / `status` / `ping` dari siaran.
     Pesan dari klien diabaikan; loop baca hanya untuk mendeteksi putus.
+
+    Browser tidak menerapkan CORS pada WebSocket, jadi handshake dicek
+    sendiri: sumber, Origin, dan sesi admin. Tanpa ini situs lain yang
+    dibuka admin dapat membaca seluruh umpan insiden.
     """
+    if _cek_akses_admin(ws) or not sesi.valid(ws.cookies.get(km.NAMA_COOKIE)):
+        await ws.close(code=1008)  # policy violation
+        return
     await koneksi_ws.connect(ws, pesan_awal=_snapshot)
     try:
         while True:
@@ -758,16 +972,21 @@ async def umpan_ws(ws: WebSocket):
         koneksi_ws.disconnect(ws)
 
 
-@app.post("/api/setup-firewall")
+@admin.post("/api/setup-firewall")
 async def setup_firewall():
     """Menyiapkan struktur firewall di router. Dijalankan sekali di awal."""
     if not mitigator:
         raise HTTPException(503, "Modul mitigasi belum siap")
 
     berhasil = await _mitigasi(mitigator.siapkan_firewall)
+    _audit("setup_firewall", "admin", berhasil=berhasil, dry_run=cfg.DRY_RUN)
     return {"status": "berhasil" if berhasil else "gagal"}
+
+
+app.include_router(admin)
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Hanya dari mesin ini; saat lab jalankan dengan --host 192.168.172.1
+    uvicorn.run(app, host="127.0.0.1", port=8000)

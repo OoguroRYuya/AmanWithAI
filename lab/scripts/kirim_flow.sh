@@ -18,6 +18,12 @@
 #   STATE       daftar file yang sudah terkirim    (default /tmp/kirim_flow.terkirim)
 #   KIRIM_LAMA  1 = saat STATE belum ada, kirim juga file sesi lama (default 0)
 #   TZ_NFDUMP   zona waktu untuk nfdump            (default WIB-7 = UTC+7)
+#   TOKEN_FILE  berkas berisi INGEST_TOKEN backend (default ~/.ndr_ingest_token)
+#
+# TOKEN: backend menolak /api/ingest tanpa token. Simpan token (sama dengan
+# INGEST_TOKEN di backend/.env) sekali saja:
+#   umask 077; printf '%s' '<token>' > ~/.ndr_ingest_token
+# Token dikirim lewat berkas header, bukan argumen, agar tidak tampak di `ps`.
 #
 # Format ekspor sengaja SAMA dengan data latih (tanpa -N), ditambah -q agar
 # baris header dan ringkasan nfdump tidak ikut terkirim.
@@ -35,10 +41,22 @@ STATE=${STATE:-/tmp/kirim_flow.terkirim}
 TZ_NFDUMP=${TZ_NFDUMP:-WIB-7}
 FORMAT='fmt:%ts,%td,%pr,%sa,%sp,%da,%dp,%flg,%pkt,%byt'
 
+TOKEN_FILE=${TOKEN_FILE:-$HOME/.ndr_ingest_token}
+
 if [ -z "$COLLECTOR" ]; then
   echo "COLLECTOR tidak ditemukan. Set COLLECTOR=<nama container>." >&2
   exit 1
 fi
+if [ ! -s "$TOKEN_FILE" ]; then
+  echo "Token ingest tidak ditemukan di $TOKEN_FILE (lihat komentar TOKEN di atas)." >&2
+  exit 1
+fi
+
+# Berkas header berizin 600, dihapus saat skrip berhenti
+HEADER=$(mktemp)
+chmod 600 "$HEADER"
+trap 'rm -f "$HEADER"' EXIT INT TERM
+printf 'Authorization: Bearer %s\n' "$(cat "$TOKEN_FILE")" > "$HEADER"
 
 daftar_file() {
   docker exec "$COLLECTOR" find "$DIR_NFCAPD" -type f -name 'nfcapd.[0-9]*' 2>/dev/null | sort
@@ -63,7 +81,7 @@ while true; do
 
       kode=$(docker exec -e TZ="$TZ_NFDUMP" "$COLLECTOR" nfdump -q -r "$f" -o "$FORMAT" \
         | curl -s -o /dev/null -w '%{http_code}' -X POST \
-            -H 'Content-Type: text/csv' -H "X-Nama-File: $(basename "$f")" \
+            -H @"$HEADER" -H 'Content-Type: text/csv' -H "X-Nama-File: $(basename "$f")" \
             --data-binary @- "$BACKEND")
 
       case "$kode" in
@@ -74,6 +92,10 @@ while true; do
           # 400 = CSV kosong (tidak ada flow di jendela ini); jangan dikirim ulang
           echo "$f" >> "$STATE"
           echo "$(date '+%F %T') kosong   $(basename "$f")" ;;
+        401|403)
+          # token salah atau IP VM tidak ada di INGEST_SUMBER: dicoba lagi,
+          # tetapi beri tahu jelas karena tidak akan sembuh sendiri
+          echo "$(date '+%F %T') DITOLAK  $(basename "$f") (HTTP $kode: periksa token / INGEST_SUMBER)" >&2 ;;
         *)
           # gagal (backend mati/jaringan): tidak dicatat, dicoba lagi berikutnya
           echo "$(date '+%F %T') GAGAL    $(basename "$f") (HTTP $kode)" >&2 ;;
