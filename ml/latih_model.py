@@ -55,10 +55,10 @@ FITUR = [
     "syn_flag_count",
     "unique_src_ip_per_dst",
     "protocol",
-    "mean_packet_interval",
+    "inter_arrival_time",
 ]
 
-KELAS =["normal", "ddos_flood", "port_scanning"]
+KELAS = ["normal", "ddos_flood", "port_scanning"]
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.3
@@ -269,15 +269,37 @@ def tampilkan_permutation_importance(model, X_test, y_test, nama, n_repeats=10):
 # ---------------------------------------------------------------- pelatihan
 
 
-def latih(df, simpan_model=True, uji_sesi=None):
+class XGBWrapper:
+    """Bungkus model XGBoost agar predict() mengembalikan label teks seperti
+    Random Forest. Didefinisikan di tingkat modul (bukan lokal di dalam
+    latih()) supaya objeknya bisa di-pickle oleh joblib saat model disimpan.
+    """
+
+    def __init__(self, model, peta):
+        self.model = model
+        self.balik = {v: k for k, v in peta.items()}
+        self.feature_importances_ = model.feature_importances_
+
+    def predict(self, X):
+        return np.array([self.balik[i] for i in self.model.predict(X)])
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+
+def latih(df, simpan_model=True, uji_sesi=None, val_sesi=None):
     """Melatih kedua model, mengevaluasi, lalu memilih yang terbaik.
 
-    Pemisahan data latih/uji:
+    Pemisahan data latih/validasi/uji:
     - Bila ada kolom 'sesi', pemisahan dilakukan PER SESI, bukan per flow:
       seluruh flow dari satu sesi masuk ke salah satu sisi saja. Ini penting
       karena flow dari satu serangan yang sama (satu sesi) sangat mirip; bila
       sebagian masuk latih dan sebagian masuk uji, model seolah "sudah pernah
       melihat" data uji sehingga skornya naik secara semu (kebocoran data).
+    - `val_sesi` (opsional, butir 62/63): tahan satu sesi sebagai VALIDASI.
+      Pemilihan model (dan, offline, penyetelan ambang) dilakukan di validasi;
+      data UJI hanya dilihat SEKALI di akhir untuk angka final → tidak bias.
+      Contoh: latih sesi 1-2, validasi sesi 3, uji sesi 4.
     - Bila tidak ada kolom 'sesi', kembali ke pemisahan acak terstratifikasi
       seperti semula (perilaku Eksperimen 1 tidak berubah).
     """
@@ -285,6 +307,7 @@ def latih(df, simpan_model=True, uji_sesi=None):
     y = df["label"]
 
     label_kelas = sorted(y.unique().tolist())
+    X_val = y_val = None  # diisi hanya bila val_sesi dipakai
 
     if "sesi" in df.columns and df["sesi"].nunique() > 1:
         grup = df["sesi"]
@@ -297,10 +320,40 @@ def latih(df, simpan_model=True, uji_sesi=None):
                     f"Sesi uji {uji_sesi} tidak ditemukan. "
                     f"Sesi tersedia: {sorted(grup.unique().tolist())}"
                 )
-            X_train, X_test = X[~mask_uji], X[mask_uji]
-            y_train, y_test = y[~mask_uji], y[mask_uji]
-            print(f"\n  Pemisahan per sesi (hold-out): uji = sesi {sorted(uji_sesi)}")
+            if val_sesi is not None:
+                # Tiga bagian: latih = sisanya, validasi = val_sesi, uji = uji_sesi.
+                mask_val = grup.isin(val_sesi)
+                if not mask_val.any():
+                    raise ValueError(
+                        f"Sesi validasi {val_sesi} tidak ditemukan. "
+                        f"Sesi tersedia: {sorted(grup.unique().tolist())}"
+                    )
+                if (mask_uji & mask_val).any():
+                    raise ValueError(
+                        f"Sesi uji {sorted(uji_sesi)} dan validasi {sorted(val_sesi)} "
+                        "tidak boleh tumpang tindih."
+                    )
+                mask_latih = ~(mask_uji | mask_val)
+                if not mask_latih.any():
+                    raise ValueError(
+                        "Tidak ada sesi tersisa untuk latih. Sisakan minimal satu "
+                        "sesi di luar validasi dan uji."
+                    )
+                X_train, X_test = X[mask_latih], X[mask_uji]
+                y_train, y_test = y[mask_latih], y[mask_uji]
+                X_val, y_val = X[mask_val], y[mask_val]
+                print(
+                    f"\n  Pemisahan per sesi (3 bagian): "
+                    f"latih = sesi {sorted(grup[mask_latih].unique().tolist())}, "
+                    f"validasi = sesi {sorted(val_sesi)}, uji = sesi {sorted(uji_sesi)}"
+                )
+            else:
+                X_train, X_test = X[~mask_uji], X[mask_uji]
+                y_train, y_test = y[~mask_uji], y[mask_uji]
+                print(f"\n  Pemisahan per sesi (hold-out): uji = sesi {sorted(uji_sesi)}")
         else:
+            if val_sesi is not None:
+                print("  [PERINGATAN] --val-sesi diabaikan karena --uji-sesi tidak diberi.")
             # Pisahkan sesi secara acak hingga ~TEST_SIZE flow masuk uji,
             # tanpa ada sesi yang terpotong ke dua sisi.
             gss = GroupShuffleSplit(
@@ -324,6 +377,8 @@ def latih(df, simpan_model=True, uji_sesi=None):
         )
 
     print(f"\n  Data latih : {len(X_train)} record")
+    if X_val is not None:
+        print(f"  Data valid : {len(X_val)} record")
     print(f"  Data uji   : {len(X_test)} record")
 
     hasil_semua = []
@@ -369,18 +424,8 @@ def latih(df, simpan_model=True, uji_sesi=None):
         xgb.fit(X_train, y_train_num)
 
         # Bungkus agar predict() mengembalikan label teks seperti Random Forest
-        class XGBWrapper:
-            def __init__(self, model, peta):
-                self.model = model
-                self.balik = {v: k for k, v in peta.items()}
-                self.feature_importances_ = model.feature_importances_
-
-            def predict(self, X):
-                return np.array([self.balik[i] for i in self.model.predict(X)])
-
-            def predict_proba(self, X):
-                return self.model.predict_proba(X)
-
+        # (kelas XGBWrapper didefinisikan di tingkat modul di atas agar
+        # modelnya bisa di-pickle saat disimpan).
         xgb_wrap = XGBWrapper(xgb, peta_label)
         hasil_xgb = evaluasi("XGBoost", xgb_wrap, X_test, y_test, label_kelas)
         hasil_xgb["feature_importance"] = tampilkan_feature_importance(xgb_wrap, "XGBoost")
@@ -412,9 +457,29 @@ def latih(df, simpan_model=True, uji_sesi=None):
         )
 
     # F1-score dipakai sebagai dasar pemilihan karena menyeimbangkan
-    # precision dan recall, sesuai kebutuhan sistem deteksi serangan
-    terbaik = max(hasil_semua, key=lambda h: h["f1_macro"])
-    print(f"\n  Model terbaik berdasarkan F1-score: {terbaik['nama']}")
+    # precision dan recall, sesuai kebutuhan sistem deteksi serangan.
+    # Bila ada data VALIDASI, pemilihan model memakai F1 di validasi — angka
+    # uji (di atas) hanya dilihat sekali untuk pelaporan final, tidak untuk
+    # memilih model (menghindari bias; butir 62/63).
+    if X_val is not None:
+        f1_val = {
+            h["nama"]: f1_score(
+                y_val, model_terlatih[h["nama"]].predict(X_val),
+                average="macro", zero_division=0,
+            )
+            for h in hasil_semua
+        }
+        print("\n  F1-makro di VALIDASI (dasar pemilihan model):")
+        for nama, nilai in f1_val.items():
+            print(f"    {nama:<18} {nilai:.4f}")
+        terbaik = max(hasil_semua, key=lambda h: f1_val[h["nama"]])
+        for h in hasil_semua:
+            h["f1_macro_val"] = f1_val[h["nama"]]
+        print(f"\n  Model terbaik (berdasarkan VALIDASI): {terbaik['nama']}")
+        print("  Angka UJI di atas = performa final model ini pada data yang belum pernah dilihat.")
+    else:
+        terbaik = max(hasil_semua, key=lambda h: h["f1_macro"])
+        print(f"\n  Model terbaik berdasarkan F1-score (uji): {terbaik['nama']}")
 
     if simpan_model:
         import joblib
@@ -469,6 +534,15 @@ def main():
         help="Tahan sesi tertentu sebagai data uji (mis. --uji-sesi 4). "
         "Tanpa opsi ini, bila ada kolom 'sesi' sesi dipisah acak per grup.",
     )
+    parser.add_argument(
+        "--val-sesi",
+        type=int,
+        nargs="+",
+        metavar="N",
+        help="Tahan sesi tertentu sebagai data VALIDASI (mis. --val-sesi 3). "
+        "Perlu --uji-sesi juga. Pemilihan model memakai validasi; data uji "
+        "hanya dilihat sekali untuk angka final (butir 62/63).",
+    )
     args = parser.parse_args()
 
     if args.gabung:
@@ -487,7 +561,8 @@ def main():
     if not periksa_dataset(df):
         sys.exit(1)
 
-    latih(df, simpan_model=not args.tanpa_simpan, uji_sesi=args.uji_sesi)
+    latih(df, simpan_model=not args.tanpa_simpan, uji_sesi=args.uji_sesi,
+          val_sesi=args.val_sesi)
 
 
 if __name__ == "__main__":
