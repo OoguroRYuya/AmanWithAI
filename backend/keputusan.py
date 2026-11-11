@@ -46,6 +46,19 @@ BLOKIR_OTOMATIS = "blokir_otomatis"
 MENUNGGU_PERSETUJUAN = "menunggu_persetujuan"
 DICATAT = "dicatat"
 
+# Toleransi perbandingan ambang untuk meredam galat floating-point. Rata-rata
+# confidence yang secara nominal sama dengan ambang (mis. 0,70 yang tersimpan
+# sebagai 0,6999999...) dianggap MEMENUHI ambang, sedangkan nilai yang benar-
+# benar di bawah (mis. 0,699999) tetap di bawah. Gerbang blokir dan antrean
+# memakai pembanding yang SAMA ini sehingga tidak ada celah di nilai batas.
+# (Koreksi Pak Deni butir 50.)
+TOLERANSI_AMBANG = 1e-9
+
+
+def _memenuhi(nilai, ambang):
+    """True bila nilai >= ambang dengan toleransi floating-point."""
+    return nilai >= ambang - TOLERANSI_AMBANG
+
 
 @dataclass
 class EvaluasiSumber:
@@ -53,6 +66,7 @@ class EvaluasiSumber:
     rasio_serangan: float
     conf_rata: float
     lolos: bool
+    kandidat: bool
     alasan: str
 
 
@@ -86,24 +100,36 @@ class HasilKeputusan:
         return [k for k in self.keputusan if k.status == MENUNGGU_PERSETUJUAN]
 
 
-def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, allowlist):
+def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, ambang_sedang, allowlist):
     stat = per_sumber.get(ip, {})
     total = stat.get("total", 0)
     serangan = sum(stat.get(k, 0) for k in KELAS_SERANGAN)
     rasio = serangan / total if total else 0.0
     conf = stat.get("conf_serangan", 0.0) / serangan if serangan else 0.0
 
+    # Semua perbandingan ambang memakai _memenuhi (tak dibulatkan + toleransi)
+    # supaya gerbang blokir dan antrean konsisten di nilai batas.
     if ip in allowlist:
         alasan = "ada di allowlist"
-    elif rasio < ambang_rasio:
+    elif not _memenuhi(rasio, ambang_rasio):
         alasan = f"rasio serangan {rasio:.2f} < {ambang_rasio:.2f}"
-    elif conf < ambang_conf:
+    elif not _memenuhi(conf, ambang_conf):
         alasan = f"confidence rata-rata {conf:.2f} < {ambang_conf:.2f}"
     else:
         alasan = "lolos semua gerbang"
 
     lolos = alasan == "lolos semua gerbang"
-    return EvaluasiSumber(ip, round(rasio, 4), round(conf, 4), lolos, alasan)
+    # Kandidat antrean: lolos gerbang rasio & bukan allowlist, confidence di
+    # [ambang_sedang, ambang_conf). Pakai conf TAK dibulatkan yang sama dengan
+    # gerbang blokir, jadi conf = 0,70 pasti blokir (bukan jatuh ke "dicatat").
+    kandidat = (
+        not lolos
+        and ip not in allowlist
+        and _memenuhi(rasio, ambang_rasio)
+        and _memenuhi(conf, ambang_sedang)
+        and not _memenuhi(conf, ambang_conf)
+    )
+    return EvaluasiSumber(ip, round(rasio, 4), round(conf, 4), lolos, kandidat, alasan)
 
 
 def _ringkas_ip(daftar):
@@ -173,15 +199,12 @@ def putuskan(
             continue
 
         evals = [
-            evaluasi_sumber(ip, hasil.per_sumber, ambang_rasio, ambang_conf, allowlist)
+            evaluasi_sumber(ip, hasil.per_sumber, ambang_rasio, ambang_conf,
+                            ambang_sedang, allowlist)
             for ip in ins.sumber
         ]
         lolos = [e for e in evals if e.lolos]
-        kandidat = [
-            e for e in evals
-            if e.rasio_serangan >= ambang_rasio and e.ip not in allowlist
-            and ambang_sedang <= e.conf_rata < ambang_conf
-        ]
+        kandidat = [e for e in evals if e.kandidat]
 
         if lolos:
             status = BLOKIR_OTOMATIS

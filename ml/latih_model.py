@@ -14,9 +14,16 @@ Alur pemakaian:
 
 Keluaran:
     - Metrik evaluasi (accuracy, precision, recall, F1-score) kedua model
+    - FPR/FNR per kelas (koreksi Pak Deni: alarm palsu & serangan terlewat)
     - Confusion matrix kedua model
-    - Analisis feature importance
+    - Feature importance Gini + permutation importance (RF & XGBoost)
     - Model terbaik tersimpan sebagai model_terbaik.pkl
+
+Catatan latih ulang (koreksi Pak Deni 2026-11-10):
+    - Label TIDAK lagi berasal dari dst_port_count (lihat label_per_window.py
+      versi baru: label dari rentang IP sumber / jadwal generator).
+    - packet_count memakai %pkt asli nfdump (ekstraksi_fitur.py:
+      ESTIMASI_PACKET_COUNT = False).
 """
 
 import argparse
@@ -27,6 +34,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -133,6 +141,30 @@ def periksa_dataset(df):
 # ---------------------------------------------------------------- evaluasi
 
 
+def fpr_fnr_per_kelas(cm, label_kelas):
+    """FPR & FNR tiap kelas dari confusion matrix (baris=aktual, kolom=prediksi).
+
+    Dengan pendekatan one-vs-rest per kelas:
+        FPR = FP / (FP + TN)   -> proporsi alarm palsu
+        FNR = FN / (FN + TP)   -> proporsi kejadian kelas ini yang terlewat
+    Melengkapi precision/recall dengan sudut pandang alarm palsu (FPR) dan
+    serangan terlewat (FNR). (Koreksi Pak Deni.)
+    """
+    cm = np.array(cm)
+    total = cm.sum()
+    out = {}
+    for i, k in enumerate(label_kelas):
+        TP = cm[i, i]
+        FN = cm[i, :].sum() - TP
+        FP = cm[:, i].sum() - TP
+        TN = total - TP - FN - FP
+        out[k] = {
+            "FPR": float(FP / (FP + TN)) if (FP + TN) else 0.0,
+            "FNR": float(FN / (FN + TP)) if (FN + TP) else 0.0,
+        }
+    return out
+
+
 def evaluasi(nama, model, X_test, y_test, label_kelas):
     """Menghitung seluruh metrik evaluasi untuk satu model."""
     y_pred = model.predict(X_test)
@@ -148,6 +180,7 @@ def evaluasi(nama, model, X_test, y_test, label_kelas):
             y_test, y_pred, target_names=label_kelas, zero_division=0, output_dict=True
         ),
     }
+    hasil["fpr_fnr"] = fpr_fnr_per_kelas(hasil["confusion_matrix"], label_kelas)
 
     print(f"\n{'=' * 58}")
     print(f"  {nama}")
@@ -169,12 +202,17 @@ def evaluasi(nama, model, X_test, y_test, label_kelas):
     print("\n  Rincian per kelas")
     print(classification_report(y_test, y_pred, target_names=label_kelas, zero_division=0))
 
+    # FPR/FNR per kelas (koreksi Pak Deni: lengkapi metrik deteksi)
+    print("  FPR / FNR per kelas (one-vs-rest)")
+    for k, v in hasil["fpr_fnr"].items():
+        print(f"    {k:<24} FPR={v['FPR']:.4f}  FNR={v['FNR']:.4f}")
+
     return hasil
 
 
 def tampilkan_feature_importance(model, nama):
     """
-    Menampilkan kontribusi tiap fitur terhadap keputusan model.
+    Menampilkan kontribusi tiap fitur terhadap keputusan model (Gini/gain).
 
     Analisis ini berguna untuk memvalidasi pemilihan sepuluh fitur secara
     empiris, dan dapat dilampirkan pada pembahasan hasil penelitian.
@@ -190,6 +228,42 @@ def tampilkan_feature_importance(model, nama):
         print(f"    {fitur:<24} {nilai:.4f}  {bar}")
 
     return imp.to_dict()
+
+
+def tampilkan_permutation_importance(model, X_test, y_test, nama, n_repeats=10):
+    """
+    Permutation importance: penurunan F1-makro pada data UJI saat nilai satu
+    fitur diacak. Melengkapi importance Gini/gain (yang bias ke fitur
+    berkardinalitas tinggi) dengan ukuran berbasis performa. (Koreksi Pak Deni.)
+
+    Catatan: untuk Random Forest, `model` = estimator sklearn dan `y_test`
+    berupa label teks. Untuk XGBoost, lewatkan estimator XGBClassifier mentah
+    dengan `y_test` numerik (bukan wrapper), supaya scorer sklearn cocok.
+    """
+    try:
+        r = permutation_importance(
+            model,
+            X_test,
+            y_test,
+            n_repeats=n_repeats,
+            random_state=RANDOM_STATE,
+            scoring="f1_macro",
+            n_jobs=-1,
+        )
+    except Exception as e:  # jangan gagalkan pelatihan hanya karena analisis ini
+        print(f"\n  [LEWAT] Permutation importance ({nama}) gagal: {e}")
+        return None
+
+    rata = pd.Series(r.importances_mean, index=FITUR)
+    std = pd.Series(r.importances_std, index=FITUR)
+    urut = rata.sort_values(ascending=False)
+
+    print(f"\n  Permutation importance ({nama}) — turun F1-makro saat fitur diacak")
+    for fitur, nilai in urut.items():
+        bar = "#" * max(0, int(nilai * 50))
+        print(f"    {fitur:<24} {nilai:.4f} ± {std[fitur]:.4f}  {bar}")
+
+    return {f: {"mean": float(rata[f]), "std": float(std[f])} for f in FITUR}
 
 
 # ---------------------------------------------------------------- pelatihan
@@ -268,6 +342,9 @@ def latih(df, simpan_model=True, uji_sesi=None):
     rf.fit(X_train, y_train)
     hasil_rf = evaluasi("Random Forest", rf, X_test, y_test, label_kelas)
     hasil_rf["feature_importance"] = tampilkan_feature_importance(rf, "Random Forest")
+    hasil_rf["permutation_importance"] = tampilkan_permutation_importance(
+        rf, X_test, y_test, "Random Forest"
+    )
     hasil_semua.append(hasil_rf)
     model_terlatih["Random Forest"] = rf
 
@@ -307,6 +384,11 @@ def latih(df, simpan_model=True, uji_sesi=None):
         xgb_wrap = XGBWrapper(xgb, peta_label)
         hasil_xgb = evaluasi("XGBoost", xgb_wrap, X_test, y_test, label_kelas)
         hasil_xgb["feature_importance"] = tampilkan_feature_importance(xgb_wrap, "XGBoost")
+        # Permutation importance pada estimator XGB mentah + label numerik
+        # (scorer sklearn cocok langsung, tanpa wrapper).
+        hasil_xgb["permutation_importance"] = tampilkan_permutation_importance(
+            xgb, X_test, y_test_num, "XGBoost"
+        )
         hasil_semua.append(hasil_xgb)
         model_terlatih["XGBoost"] = xgb_wrap
 

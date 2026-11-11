@@ -41,7 +41,7 @@ ESTIMASI_UKURAN_PAKET = 84
 
 # Bila True, packet_count yang bernilai nol akan diestimasi dari byte_count.
 # Set False bila exporter NetFlow-mu sudah mengisi packet count dengan benar.
-ESTIMASI_PACKET_COUNT = True
+ESTIMASI_PACKET_COUNT = False
 
 # Berapa banyak flow yang packet_count-nya benar-benar diestimasi pada ekstraksi
 # terakhir (0 = exporter mengisi field paket, jadi tidak ada yang diestimasi).
@@ -231,7 +231,7 @@ def hitung_inter_arrival(df):
     """
     hasil = np.where(
         df["packet_count"] > 1,
-        df["duration"] / df["packet_count"].replace(0, np.nan),
+        df["duration"] / (df["packet_count"] - 1),
         0.0,
     )
     return pd.Series(hasil, index=df.index).fillna(0.0)
