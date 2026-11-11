@@ -55,7 +55,7 @@ FITUR = [
     "syn_flag_count",
     "unique_src_ip_per_dst",
     "protocol",
-    "inter_arrival_time",
+    "mean_packet_interval",
 ]
 
 KELAS = ["normal", "ddos_flood", "port_scanning"]
