@@ -10,7 +10,7 @@ SELESAI=$(( $(date +%s) + LAMA ))
 rnd() { shuf -i "$1-$2" -n 1; }
 
 while [ "$(date +%s)" -lt "$SELESAI" ]; do
-  SRC="192.168.20.$(rnd 10 30)"
+  SRC="192.168.20.$(rnd 11 30)"
   case $(rnd 1 5) in                      # jenis scan
     1|2) JENIS=-sS ;; 3) JENIS=-sT ;; 4) JENIS=-sF ;; 5) JENIS=-sA ;;
   esac
