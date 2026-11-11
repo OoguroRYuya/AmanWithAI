@@ -33,7 +33,7 @@ export default function BarisStatus({
       </div>
 
       <div className={`mode ${dryRun ? "mode-dry" : "mode-aktif"}`} role="status">
-        <strong>{dryRun ? "DRY RUN" : "AKTIF"}</strong>
+        <strong>{dryRun ? "Dry run" : "Aktif"}</strong>
         <span>{dryRun ? "perintah tidak dikirim ke router" : "memblokir langsung di router"}</span>
       </div>
 
@@ -55,27 +55,21 @@ export default function BarisStatus({
           <dd>{fAngka(jumlahMenunggu)}</dd>
         </div>
         <div>
-          <dt>Ambang</dt>
-          <dd className="ambang">
-            rasio ≥ {status?.ambang_rasio_serangan?.toFixed(2) ?? "–"} · blokir ≥{" "}
-            {status?.ambang_conf_blokir?.toFixed(2) ?? "–"} · setuju ≥ {status?.ambang_sedang?.toFixed(2) ?? "–"}
-          </dd>
-        </div>
-        <div>
           <dt>WebSocket</dt>
           <dd className={`koneksi koneksi-${koneksi}`}>
+            {/* titik = keadaan koneksi saat ini (bukan dekorasi) */}
             <span className="titik" aria-hidden />
             {LABEL_KONEKSI[koneksi]}
             {pesanTerakhir && koneksi === "tersambung" && (
-              <span className="redup" title="Pesan terakhir diterima">
-                {" "}· {new Date(pesanTerakhir).toLocaleTimeString("id-ID")}
-              </span>
+              <time className="waktu-pesan" title="Pesan terakhir diterima">
+                {new Date(pesanTerakhir).toLocaleTimeString("id-ID")}
+              </time>
             )}
           </dd>
         </div>
       </dl>
 
-      <button className="tombol kecil" onClick={onKeluar}>
+      <button type="button" className="tombol kecil" onClick={onKeluar}>
         Keluar
       </button>
     </header>

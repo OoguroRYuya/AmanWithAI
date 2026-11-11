@@ -35,21 +35,28 @@ export default function TabelInsiden({ insiden, onPilih }: Props) {
       <div className="kartu-kepala">
         <div>
           <h2>Insiden</h2>
-          <p className="redup">
-            {fAngka(insiden.length)} insiden · klik baris untuk melihat narasi saran dan evaluasi sumber
-          </p>
+          <p className="redup">Klik baris untuk melihat narasi saran dan evaluasi sumber</p>
         </div>
-        <select value={filter} onChange={(e) => setFilter(e.target.value as StatusInsiden | "semua")}>
-          {FILTER.map((f) => (
-            <option key={f.nilai} value={f.nilai}>
-              {f.label}
-            </option>
-          ))}
-        </select>
+        <div className="kepala-kanan">
+          <select
+            aria-label="Saring status insiden"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value as StatusInsiden | "semua")}
+          >
+            {FILTER.map((f) => (
+              <option key={f.nilai} value={f.nilai}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+          <span className="hitungan" title="Jumlah insiden">
+            {fAngka(insiden.length)}
+          </span>
+        </div>
       </div>
 
-      <div className="gulir tabel-insiden">
-        <table>
+      <div className="gulir">
+        <table className="tabel-tempel">
           <thead>
             <tr>
               <th>#</th>
@@ -76,10 +83,17 @@ export default function TabelInsiden({ insiden, onPilih }: Props) {
                 className="bisa-klik"
                 tabIndex={0}
                 onClick={() => onPilih(i.id)}
-                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onPilih(i.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    // tanpa ini, sisa event Enter mengeklik tombol Tutup di
+                    // dialog yang baru terbuka sehingga dialog langsung tertutup
+                    e.preventDefault();
+                    onPilih(i.id);
+                  }
+                }}
               >
-                <td className="redup">{i.id}</td>
-                <td>{fTanggalJam(i.window)}</td>
+                <td className="mono redup">{i.id}</td>
+                <td className="mono waktu">{fTanggalJam(i.window)}</td>
                 <td>
                   <LencanaKelas kelas={i.kelas} />
                 </td>
@@ -96,7 +110,7 @@ export default function TabelInsiden({ insiden, onPilih }: Props) {
         </table>
       </div>
       {tersaring.length > batas && (
-        <button className="tombol-teks" onClick={() => setBatas((b) => b + TAMPIL_AWAL)}>
+        <button type="button" className="tombol-teks" onClick={() => setBatas((b) => b + TAMPIL_AWAL)}>
           Tampilkan {Math.min(TAMPIL_AWAL, tersaring.length - batas)} lagi
         </button>
       )}

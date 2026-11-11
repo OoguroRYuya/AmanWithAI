@@ -9,6 +9,7 @@ import { LencanaKelas } from "./Lencana";
 
 interface Props {
   menunggu: Insiden[];
+  ambangRasio?: number;
   ambangSedang?: number;
   ambangBlokir?: number;
   onSetujui: (id: number) => Promise<boolean>;
@@ -16,7 +17,15 @@ interface Props {
   onPilih: (id: number) => void;
 }
 
-export default function AntreanPersetujuan({ menunggu, ambangSedang, ambangBlokir, onSetujui, onTolak, onPilih }: Props) {
+export default function AntreanPersetujuan({
+  menunggu,
+  ambangRasio,
+  ambangSedang,
+  ambangBlokir,
+  onSetujui,
+  onTolak,
+  onPilih,
+}: Props) {
   // id insiden yang sedang diproses, supaya tombolnya tidak diklik dua kali
   const [proses, setProses] = useState<Set<number>>(new Set());
 
@@ -51,21 +60,28 @@ export default function AntreanPersetujuan({ menunggu, ambangSedang, ambangBloki
             const sibuk = proses.has(i.id);
             return (
               <li key={i.id}>
-                <button className="info-antrean" onClick={() => onPilih(i.id)}>
+                <button type="button" className="info-antrean" onClick={() => onPilih(i.id)}>
                   <span className="baris-lencana">
-                    <span className="redup">#{i.id}</span>
+                    <span className="mono redup">#{i.id}</span>
                     <LencanaKelas kelas={i.kelas} />
                     <span className="mono">{i.kunci}</span>
                   </span>
-                  <span className="redup">
-                    {fTanggalJam(i.window)} · {fAngka(i.ip_kandidat.length)} IP kandidat · conf {fPersen(i.confidence)}
+                  <span className="meta-antrean">
+                    <time className="mono waktu">{fTanggalJam(i.window)}</time>
+                    <span>{fAngka(i.ip_kandidat.length)} IP kandidat</span>
+                    <span>conf {fPersen(i.confidence)}</span>
                   </span>
                 </button>
                 <div className="tombol-grup">
-                  <button className="tombol utama" disabled={sibuk} onClick={() => jalankan(i.id, onSetujui)}>
+                  <button
+                    type="button"
+                    className="tombol utama"
+                    disabled={sibuk}
+                    onClick={() => jalankan(i.id, onSetujui)}
+                  >
                     Setujui
                   </button>
-                  <button className="tombol" disabled={sibuk} onClick={() => jalankan(i.id, onTolak)}>
+                  <button type="button" className="tombol" disabled={sibuk} onClick={() => jalankan(i.id, onTolak)}>
                     Tolak
                   </button>
                 </div>
@@ -74,6 +90,22 @@ export default function AntreanPersetujuan({ menunggu, ambangSedang, ambangBloki
           })}
         </ul>
       )}
+
+      {/* Ambang keputusan yang menentukan isi antrean ini (sebelumnya di baris status) */}
+      <dl className="ambang">
+        <div>
+          <dt>Ambang rasio</dt>
+          <dd>≥ {ambangRasio?.toFixed(2) ?? "–"}</dd>
+        </div>
+        <div>
+          <dt>Ambang blokir</dt>
+          <dd>≥ {ambangBlokir?.toFixed(2) ?? "–"}</dd>
+        </div>
+        <div>
+          <dt>Ambang setuju</dt>
+          <dd>≥ {ambangSedang?.toFixed(2) ?? "–"}</dd>
+        </div>
+      </dl>
     </section>
   );
 }

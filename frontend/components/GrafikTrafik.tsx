@@ -34,7 +34,8 @@ function Tip({ active, payload }: { active?: boolean; payload?: { payload: Titik
         </div>
       ))}
       <div className="tooltip-kaki">
-        {fAngka(d.insiden)} insiden · {fAngka(d.backscatter)} flow backscatter dibuang
+        <span>{fAngka(d.insiden)} insiden</span>
+        <span>{fAngka(d.backscatter)} flow backscatter dibuang</span>
       </div>
     </div>
   );
@@ -74,8 +75,10 @@ export default function GrafikTrafik({ trafik }: { trafik: Record<string, Trafik
         </label>
       </div>
 
-      {/* Legenda selalu ada; nilai jendela terakhir ikut sebagai label langsung */}
+      {/* Legenda selalu ada; angka di sampingnya milik jendela terakhir saja,
+          jadi jendelanya disebut agar tidak terbaca sebagai total */}
       <ul className="legenda">
+        {terakhir && <li className="legenda-jendela">Jendela terakhir {fJam(terakhir.window)}</li>}
         {KELAS.map((k) => (
           <li key={k} className={seri.includes(k) ? "" : "nonaktif"}>
             <span className={`kunci-seri seri-${k}`} aria-hidden />
@@ -91,23 +94,24 @@ export default function GrafikTrafik({ trafik }: { trafik: Record<string, Trafik
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap="20%">
-              <CartesianGrid vertical={false} stroke="var(--garis)" />
+              <CartesianGrid vertical={false} stroke="var(--color-rule)" />
               <XAxis
                 dataKey="window"
                 tickFormatter={(w: string) => fJam(w)}
-                tick={{ fill: "var(--tinta-redup)", fontSize: 12 }}
-                axisLine={{ stroke: "var(--sumbu)" }}
+                tick={{ fill: "var(--color-muted)", fontSize: 12, fontFamily: "var(--font-outlier)" }}
+                axisLine={{ stroke: "var(--color-rule-2)" }}
                 tickLine={false}
                 minTickGap={24}
               />
               <YAxis
                 tickFormatter={ringkas}
-                tick={{ fill: "var(--tinta-redup)", fontSize: 12 }}
+                tick={{ fill: "var(--color-muted)", fontSize: 12, fontFamily: "var(--font-outlier)" }}
                 axisLine={false}
                 tickLine={false}
                 width={44}
+                tickCount={4}
               />
-              <Tooltip content={<Tip />} cursor={{ fill: "var(--sorot)" }} isAnimationActive={false} />
+              <Tooltip content={<Tip />} cursor={{ fill: "var(--color-paper-3)" }} isAnimationActive={false} />
               {seri.map((k, i) => (
                 <Bar
                   key={k}
@@ -116,10 +120,10 @@ export default function GrafikTrafik({ trafik }: { trafik: Record<string, Trafik
                   stackId="kelas"
                   fill={`var(--seri-${k})`}
                   // celah 2px warna permukaan antar segmen tumpukan
-                  stroke="var(--permukaan)"
+                  stroke="var(--color-paper-2)"
                   strokeWidth={2}
                   maxBarSize={24}
-                  radius={i === seri.length - 1 ? [4, 4, 0, 0] : 0}
+                  radius={i === seri.length - 1 ? [2, 2, 0, 0] : 0}
                   isAnimationActive={false}
                 />
               ))}

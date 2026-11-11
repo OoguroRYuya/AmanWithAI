@@ -75,7 +75,7 @@ function Dashboard({ onKeluar }: { onKeluar: () => void }) {
   const s = keadaan.status;
 
   return (
-    <main className="halaman">
+    <div className="aplikasi">
       <BarisStatus
         status={s}
         koneksi={keadaan.koneksi}
@@ -85,27 +85,32 @@ function Dashboard({ onKeluar }: { onKeluar: () => void }) {
         onKeluar={onKeluar}
       />
 
-      <GrafikTrafik trafik={keadaan.trafik} />
-
-      <div className="dua-kolom">
-        <AntreanPersetujuan
-          menunggu={menunggu}
-          ambangSedang={s?.ambang_sedang}
-          ambangBlokir={s?.ambang_conf_blokir}
-          onSetujui={aksi.setujui}
-          onTolak={aksi.tolak}
-          onPilih={setDipilih}
-        />
-        <DaftarTerblokir
-          terblokir={keadaan.terblokir}
-          terblokirPada={keadaan.terblokirPada}
-          allowlist={s?.allowlist}
-          onCabut={aksi.cabut}
-          onBlokir={aksi.blokir}
-        />
-      </div>
-
-      <TabelInsiden insiden={insiden} onPilih={setDipilih} />
+      {/* Satu permukaan, dua kolom: kiri apa yang terjadi (trafik, ledger
+          insiden), kanan apa yang harus diputuskan (antrean, IP terblokir) */}
+      <main id="utama" className="konsol">
+        <div className="kolom kolom-utama">
+          <GrafikTrafik trafik={keadaan.trafik} />
+          <TabelInsiden insiden={insiden} onPilih={setDipilih} />
+        </div>
+        <div className="kolom kolom-samping">
+          <AntreanPersetujuan
+            menunggu={menunggu}
+            ambangRasio={s?.ambang_rasio_serangan}
+            ambangSedang={s?.ambang_sedang}
+            ambangBlokir={s?.ambang_conf_blokir}
+            onSetujui={aksi.setujui}
+            onTolak={aksi.tolak}
+            onPilih={setDipilih}
+          />
+          <DaftarTerblokir
+            terblokir={keadaan.terblokir}
+            terblokirPada={keadaan.terblokirPada}
+            allowlist={s?.allowlist}
+            onCabut={aksi.cabut}
+            onBlokir={aksi.blokir}
+          />
+        </div>
+      </main>
 
       {insidenDipilih && (
         <DetailInsiden
@@ -124,6 +129,6 @@ function Dashboard({ onKeluar }: { onKeluar: () => void }) {
           </div>
         ))}
       </div>
-    </main>
+    </div>
   );
 }

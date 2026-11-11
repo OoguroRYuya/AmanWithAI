@@ -105,7 +105,7 @@ export default function DaftarTerblokir({ terblokir, terblokirPada, allowlist = 
                 <span className={`mundur ${sisa < 60 ? "hampir" : ""}`} title={`Kedaluwarsa ${t.kedaluwarsa}`}>
                   {fHitungMundur(sisa)}
                 </span>
-                <button className="tombol kecil" disabled={dicabut.has(t.ip)} onClick={() => cabut(t.ip)}>
+                <button type="button" className="tombol kecil" disabled={dicabut.has(t.ip)} onClick={() => cabut(t.ip)}>
                   Cabut
                 </button>
               </li>

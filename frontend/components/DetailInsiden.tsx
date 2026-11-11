@@ -38,16 +38,15 @@ export default function DetailInsiden({ insiden: i, onTutup, onSetujui, onTolak 
       <div className="panel-isi">
         <div className="panel-kepala">
           <div>
-            <h2>
-              Insiden #{i.id} · {i.saran?.judul ?? i.kelas}
-            </h2>
+            <span className="nomor-insiden">Insiden #{i.id}</span>
+            <h2>{i.saran?.judul ?? i.kelas}</h2>
             <div className="baris-lencana">
               <LencanaKelas kelas={i.kelas} />
               <LencanaStatus status={i.status} />
               {i.saran?.tingkat && <span className="lencana">Risiko: {i.saran.tingkat}</span>}
             </div>
           </div>
-          <button className="tombol-teks" onClick={() => dialog.current?.close()} aria-label="Tutup">
+          <button type="button" className="tombol kecil" onClick={() => dialog.current?.close()} aria-label="Tutup">
             ✕
           </button>
         </div>
@@ -55,7 +54,7 @@ export default function DetailInsiden({ insiden: i, onTutup, onSetujui, onTolak 
         <dl className="fakta">
           <div>
             <dt>Jendela</dt>
-            <dd>{i.window.replace("T", " ")}</dd>
+            <dd className="mono waktu">{i.window.replace("T", " ")}</dd>
           </div>
           <div>
             <dt>Kunci</dt>
@@ -92,10 +91,10 @@ export default function DetailInsiden({ insiden: i, onTutup, onSetujui, onTolak 
         {menunggu && (
           <div className="aksi-persetujuan">
             <span>Blokir {fAngka(i.ip_kandidat.length)} IP kandidat?</span>
-            <button className="tombol utama" onClick={() => onSetujui(i.id)}>
+            <button type="button" className="tombol utama" onClick={() => onSetujui(i.id)}>
               Setujui
             </button>
-            <button className="tombol" onClick={() => onTolak(i.id)}>
+            <button type="button" className="tombol" onClick={() => onTolak(i.id)}>
               Tolak
             </button>
           </div>
@@ -108,33 +107,33 @@ export default function DetailInsiden({ insiden: i, onTutup, onSetujui, onTolak 
         <dl className="fakta">
           <div>
             <dt>Deteksi</dt>
-            <dd>{fDetik(i.latensi_detik?.deteksi)}</dd>
+            <dd className="mono">{fDetik(i.latensi_detik?.deteksi)}</dd>
           </div>
           <div>
             <dt>Mitigasi</dt>
-            <dd>{fDetik(i.latensi_detik?.mitigasi)}</dd>
+            <dd className="mono">{fDetik(i.latensi_detik?.mitigasi)}</dd>
           </div>
           <div>
             <dt>Akhir jendela</dt>
-            <dd>{fJam(i.t_window_end, true)}</dd>
+            <dd className="mono waktu">{fJam(i.t_window_end, true)}</dd>
           </div>
           <div>
             <dt>Diterima</dt>
-            <dd>{fJam(i.t_diterima, true)}</dd>
+            <dd className="mono waktu">{fJam(i.t_diterima, true)}</dd>
           </div>
           <div>
             <dt>Diklasifikasi</dt>
-            <dd>{fJam(i.t_klasifikasi, true)}</dd>
+            <dd className="mono waktu">{fJam(i.t_klasifikasi, true)}</dd>
           </div>
           <div>
             <dt>Dimitigasi</dt>
-            <dd>{fJam(i.t_mitigasi, true)}</dd>
+            <dd className="mono waktu">{fJam(i.t_mitigasi, true)}</dd>
           </div>
         </dl>
 
         <h3>Evaluasi sumber ({fAngka(evals.length)})</h3>
         <div className="gulir tabel-evaluasi">
-          <table>
+          <table className="tabel-tempel">
             <thead>
               <tr>
                 <th>IP sumber</th>
