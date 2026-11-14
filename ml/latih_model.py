@@ -45,6 +45,8 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
+from model_wrapper import XGBWrapper  # noqa: E402
+
 FITUR = [
     "duration",
     "packet_count",
@@ -269,24 +271,6 @@ def tampilkan_permutation_importance(model, X_test, y_test, nama, n_repeats=10):
 # ---------------------------------------------------------------- pelatihan
 
 
-class XGBWrapper:
-    """Bungkus model XGBoost agar predict() mengembalikan label teks seperti
-    Random Forest. Didefinisikan di tingkat modul (bukan lokal di dalam
-    latih()) supaya objeknya bisa di-pickle oleh joblib saat model disimpan.
-    """
-
-    def __init__(self, model, peta):
-        self.model = model
-        self.balik = {v: k for k, v in peta.items()}
-        self.feature_importances_ = model.feature_importances_
-
-    def predict(self, X):
-        return np.array([self.balik[i] for i in self.model.predict(X)])
-
-    def predict_proba(self, X):
-        return self.model.predict_proba(X)
-
-
 def latih(df, simpan_model=True, uji_sesi=None, val_sesi=None):
     """Melatih kedua model, mengevaluasi, lalu memilih yang terbaik.
 
@@ -426,7 +410,7 @@ def latih(df, simpan_model=True, uji_sesi=None, val_sesi=None):
         # Bungkus agar predict() mengembalikan label teks seperti Random Forest
         # (kelas XGBWrapper didefinisikan di tingkat modul di atas agar
         # modelnya bisa di-pickle saat disimpan).
-        xgb_wrap = XGBWrapper(xgb, peta_label)
+        xgb_wrap = XGBWrapper(xgb, peta_label, FITUR)
         hasil_xgb = evaluasi("XGBoost", xgb_wrap, X_test, y_test, label_kelas)
         hasil_xgb["feature_importance"] = tampilkan_feature_importance(xgb_wrap, "XGBoost")
         # Permutation importance pada estimator XGB mentah + label numerik
