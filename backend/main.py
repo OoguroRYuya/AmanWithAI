@@ -36,6 +36,7 @@ Dokumentasi API otomatis tersedia di:
 
 import asyncio
 import itertools
+import json
 import logging
 import os
 import sys
@@ -178,6 +179,25 @@ def _selisih_detik(akhir, awal):
     return round((akhir - awal).total_seconds(), 3)
 
 
+def _arsipkan(berkas, entri):
+    """
+    Menambah satu baris JSON ke arsip riwayat di DIR_STATUS (tambah-saja).
+    Riwayat di memori hilang saat backend restart; arsip ini menyimpan
+    insiden final dan ringkasan jendela agar latensi dan hitungan per
+    skenario tetap bisa diekspor (ml/ekspor_riwayat.py). Satu insiden bisa
+    muncul lebih dari sekali (mis. menunggu lalu disetujui): baris terakhir
+    per id adalah keadaan finalnya. Kegagalan menulis tidak pernah
+    menggagalkan deteksi.
+    """
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(berkas)), exist_ok=True)
+        with open(berkas, "a", encoding="utf-8") as f:
+            f.write(json.dumps({k: v for k, v in entri.items() if not k.startswith("_")},
+                               ensure_ascii=False, default=str) + "\n")
+    except OSError as e:
+        log.error(f"Arsip {berkas} gagal ditulis: {e}")
+
+
 def _catat(entri):
     """Menyimpan entri ke riwayat (terbaru di depan) dengan id monoton."""
     entri.setdefault("id", next(_penghitung_id))
@@ -295,6 +315,7 @@ async def _proses_window(hw, item, t_klasifikasi):
         "t_klasifikasi": _iso(t_klasifikasi),
     }
     trafik.append(entri_trafik)
+    _arsipkan(cfg.BERKAS_ARSIP_TRAFIK, entri_trafik)
     await _siarkan({"tipe": "trafik", **entri_trafik})
 
     entri_list = []
@@ -351,6 +372,7 @@ async def _proses_window(hw, item, t_klasifikasi):
 
     for e in entri_list:
         del e["_t_window_end"]
+        _arsipkan(cfg.BERKAS_ARSIP_RIWAYAT, e)
 
     # Insiden disiarkan setelah mitigasi agar dimitigasi/t_mitigasi sudah final
     for e in entri_list:
@@ -920,6 +942,7 @@ async def setujui(id_insiden: int,
         t, datetime.fromisoformat(entri["t_window_end"])
     )
     antrean_persetujuan.pop(id_insiden, None)
+    _arsipkan(cfg.BERKAS_ARSIP_RIWAYAT, entri)
     await _siarkan_mitigasi("blokir", diblokir, "manual")
     await _siarkan_insiden(entri)
     return entri
@@ -932,6 +955,7 @@ async def tolak(id_insiden: int):
     entri["status"] = "ditolak"
     antrean_persetujuan.pop(id_insiden, None)
     _audit("tolak", "admin", insiden=id_insiden, ip_kandidat=entri["ip_kandidat"])
+    _arsipkan(cfg.BERKAS_ARSIP_RIWAYAT, entri)
     # Penolakan tidak mengubah firewall, jadi cukup pembaruan insiden
     await _siarkan_insiden(entri)
     return entri

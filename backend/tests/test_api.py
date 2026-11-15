@@ -151,3 +151,32 @@ def test_setujui_dan_tolak(klien, insiden, monkeypatch):
     assert klien.post(f"/api/mitigasi/setujui/{a['id']}").status_code == 409
     assert klien.post(f"/api/mitigasi/tolak/{b['id']}").status_code == 409
     assert klien.post("/api/mitigasi/setujui/999999").status_code == 404
+
+
+def _baca_arsip(berkas):
+    import json
+    if not berkas.exists():
+        return []
+    return [json.loads(b) for b in berkas.read_text(encoding="utf-8").splitlines() if b.strip()]
+
+
+@butuh_model
+def test_arsip_riwayat_bertahan_di_disk(klien, insiden):
+    """Insiden final dan ringkasan jendela ikut ditulis ke DIR_STATUS."""
+    import konfigurasi as cfg
+    arsip = {}
+    for e in _baca_arsip(cfg.BERKAS_ARSIP_RIWAYAT):
+        arsip[e["id"]] = e          # baris terakhir per id = keadaan final
+    for e in insiden:
+        assert e["id"] in arsip
+        assert arsip[e["id"]]["latensi_detik"]["deteksi"] is not None
+        assert not any(k.startswith("_") for k in arsip[e["id"]])
+    assert _baca_arsip(cfg.BERKAS_ARSIP_TRAFIK)
+
+
+@butuh_model
+def test_arsip_mencatat_keputusan_admin(klien):
+    """Setelah test_setujui_dan_tolak, status final di arsip ikut berubah."""
+    import konfigurasi as cfg
+    status = {e["status"] for e in _baca_arsip(cfg.BERKAS_ARSIP_RIWAYAT)}
+    assert {"disetujui", "ditolak"} <= status

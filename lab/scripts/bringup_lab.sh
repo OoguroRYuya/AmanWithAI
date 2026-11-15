@@ -42,6 +42,27 @@ set_ip() {
   echo "  $c -> $ipp (gw $gw)"
 }
 
+echo "== Salin skrip repo ke container (image masih membawa skrip LAMA) =="
+# Tanpa langkah ini serang_flood.sh di container adalah versi image lama
+# (hping3 --flood, IP asli .11-30, flow 1-3 paket) yang TIDAK sama dengan
+# data latih, sehingga flood terbaca Normal. Lihat SK-02 2026-11-14.
+DIR_SKRIP=${DIR_SKRIP:-$(cd "$(dirname "$0")" && pwd)}
+salin() {
+  c=$1; shift
+  for s in "$@"; do
+    docker cp "$DIR_SKRIP/$s" "$c:/root/skrip/$s" && docker exec "$c" chmod +x "/root/skrip/$s" \
+      || { echo "GAGAL: salin $s ke $c" >&2; exit 1; }
+  done
+}
+salin "$PEN" serang_flood.sh serang_scan.sh alias_ip.sh
+salin "$CLI" trafik_normal.sh alias_ip.sh
+docker exec "$PEN" pkill hping3 2>/dev/null   # sisa serangan sesi lalu
+if docker exec "$PEN" grep -q 'SRC_LO=31' /root/skrip/serang_flood.sh; then
+  echo "  skrip revisi terpasang (SRC_LO=31)"
+else
+  echo "GAGAL: serang_flood.sh di Penyerang bukan revisi 2026-11-10 (SRC_LO=31)" >&2; exit 1
+fi
+
 echo "== Set IP dasar =="
 set_ip "$CLI" 192.168.10.10/24 192.168.10.1
 set_ip "$PEN" 192.168.20.10/24 192.168.20.1

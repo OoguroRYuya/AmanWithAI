@@ -134,3 +134,6 @@ MAKS_BLOKIR_BARU_PER_JENDELA = int(os.getenv("MAKS_BLOKIR_BARU_PER_JENDELA", "30
 DIR_STATUS = _env_path("DIR_STATUS", "backend/.state")
 # Log audit tambah-saja: setiap aksi firewall, login, dan akses ditolak
 BERKAS_AUDIT = DIR_STATUS / "audit.jsonl"
+# Arsip riwayat insiden + ringkasan jendela (bertahan setelah restart)
+BERKAS_ARSIP_RIWAYAT = DIR_STATUS / "riwayat.jsonl"
+BERKAS_ARSIP_TRAFIK = DIR_STATUS / "trafik.jsonl"

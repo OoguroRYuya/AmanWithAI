@@ -92,6 +92,13 @@ while true; do
           # 400 = CSV kosong (tidak ada flow di jendela ini); jangan dikirim ulang
           echo "$f" >> "$STATE"
           echo "$(date '+%F %T') kosong   $(basename "$f")" ;;
+        413)
+          # 413 = jendela melebihi INGEST_MAKS_MB backend. Tidak akan sembuh
+          # dengan dicoba ulang, jadi dicatat agar tidak berulang tanpa akhir.
+          # Flow jendela ini TIDAK terhitung; naikkan INGEST_MAKS_MB di
+          # backend/.env lalu kirim ulang manual bila jendela ini penting.
+          echo "$f" >> "$STATE"
+          echo "$(date '+%F %T') TERLALU BESAR $(basename "$f") (HTTP 413: jendela dilewati, lihat INGEST_MAKS_MB)" >&2 ;;
         401|403)
           # token salah atau IP VM tidak ada di INGEST_SUMBER: dicoba lagi,
           # tetapi beri tahu jelas karena tidak akan sembuh sendiri

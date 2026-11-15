@@ -96,7 +96,11 @@ def test_snapshot_memuat_keadaan_terkini(klien):
         snap = ws.receive_json()
     # /api/trafik default limit 60 = SNAPSHOT_TRAFIK
     assert snap["trafik"] == klien.get("/api/trafik").json()["data"]
-    assert snap["terblokir"] == klien.get("/api/terblokir").json()["data"]
+    # sisa_detik terus berkurang di antara dua panggilan (pernah membuat tes
+    # ini gagal acak saat detik berganti), jadi bandingkan tanpa kolom itu
+    def tanpa_sisa(d):
+        return [{k: v for k, v in e.items() if k != "sisa_detik"} for e in d]
+    assert tanpa_sisa(snap["terblokir"]) == tanpa_sisa(klien.get("/api/terblokir").json()["data"])
     assert all(e["jenis"] == "insiden" for e in snap["insiden"])
 
 
