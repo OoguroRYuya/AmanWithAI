@@ -206,13 +206,21 @@ def main():
             H.jalankan("SK-02", w, b, cek_flood)
 
         def cek_scan(ins):
+            # Lulus: ada pemindai yang diblokir otomatis, dan TIDAK ADA sumber
+            # bukan-pemindai yang ikut diblokir. Insiden scan berkunci sumber sah
+            # (mis. balasan server .30.10 yang terbaca scan) boleh muncul asal
+            # tertahan gerbang (dicatat/antrean), sama seperti SK-01.
             s = [e for e in ins if e["kelas"] == "port_scanning"]
-            ok = bool(s) and all(pemindai(e["kunci"]) and e["status"] == "blokir_otomatis" for e in s)
-            return ok, f"{len(s)} scan, kunci {sorted({e['kunci'] for e in s})}"
-        # SK-03 memakai JENDELA UTUH: fitur unique_src_ip_per_dst dihitung dari
-        # seluruh jendela, jadi menyaring hanya flow pemindai membuat nilainya
-        # palsu (mis. 3, padahal di jendela asli 157) dan scan terbaca normal.
-        # Dipilih jendela yang punya satu pemindai dengan >= MIN_FLOW_INSIDEN flow.
+            kena = any(pemindai(e["kunci"]) and e["status"] == "blokir_otomatis" for e in s)
+            salah = [e["kunci"] for e in s if not pemindai(e["kunci"]) and e["status"] == "blokir_otomatis"]
+            tertahan = sorted({e["kunci"] for e in s if not pemindai(e["kunci"])} - set(salah))
+            ket = f"{len(s)} scan, kunci {sorted({e['kunci'] for e in s})}"
+            if tertahan:
+                ket += f"; bukan pemindai tertahan gerbang: {tertahan}"
+            return kena and not salah, ket
+        # SK-03 memakai JENDELA UTUH (seluruh flow jendela itu, seperti di lab),
+        # bukan flow pemindai saja. Dipilih jendela yang punya satu pemindai
+        # dengan >= MIN_FLOW_INSIDEN flow.
         def ada_pemindai_cukup(baris):
             hitung = defaultdict(int)
             for x in baris:
