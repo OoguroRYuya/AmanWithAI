@@ -18,7 +18,7 @@ Pakai (dari akar repo, venv backend):
 Skenario dibentuk dengan menyaring flow terekam per jendela 60 detik:
   SK-01 hanya flow tanpa alamat 192.168.20.x       -> 0 insiden
   SK-02 hanya flow .20.31-250 <-> 192.168.30.10     -> ddos_flood blokir otomatis
-  SK-03 hanya flow .20.11-30                         -> port_scanning blokir otomatis
+  SK-03 jendela UTUH berisi pemindai .20.11-30 >=20 flow -> port_scanning blokir otomatis
   SK-04 SK-01 + SK-02 dalam jendela yang sama        -> ddos, 0 klien .10.x diblokir
   SK-05 SK-02 dengan AMBANG_CONF_BLOKIR=1.01         -> antrean; setujui/tolak benar
   SK-06 cabut satu IP terblokir                      -> hilang dari /api/terblokir
@@ -209,7 +209,19 @@ def main():
             s = [e for e in ins if e["kelas"] == "port_scanning"]
             ok = bool(s) and all(pemindai(e["kunci"]) and e["status"] == "blokir_otomatis" for e in s)
             return ok, f"{len(s)} scan, kunci {sorted({e['kunci'] for e in s})}"
-        for w, b in pilih(hanya_scan, 20):
+        # SK-03 memakai JENDELA UTUH: fitur unique_src_ip_per_dst dihitung dari
+        # seluruh jendela, jadi menyaring hanya flow pemindai membuat nilainya
+        # palsu (mis. 3, padahal di jendela asli 157) dan scan terbaca normal.
+        # Dipilih jendela yang punya satu pemindai dengan >= MIN_FLOW_INSIDEN flow.
+        def ada_pemindai_cukup(baris):
+            hitung = defaultdict(int)
+            for x in baris:
+                sa = x.split(",")[3].strip()
+                if pemindai(sa):
+                    hitung[sa] += 1
+            return max(hitung.values(), default=0) >= cfg.MIN_FLOW_INSIDEN
+        jendela_scan = [(w, b) for w, b in sorted(per.items()) if ada_pemindai_cukup(b)][:a.jendela]
+        for w, b in jendela_scan:
             H.jalankan("SK-03", w, b, cek_scan)
 
         normal = dict(pilih(tanpa_penyerang, 50))
