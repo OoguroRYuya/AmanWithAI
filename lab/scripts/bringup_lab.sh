@@ -96,9 +96,16 @@ docker exec "$TGT" sh -c '[ -x /root/skrip/setup_target.sh ] && /root/skrip/setu
   || echo "  (lewati: setup_target.sh tidak ada di /root/skrip — jalankan manual bila perlu)"
 
 echo "== Mulai nfcapd di Collector (window 60 detik) =="
-docker exec "$COL" sh -c 'pkill nfcapd 2>/dev/null; mkdir -p /data/nfcapd; \
+# Jeda setelah pkill: nfcapd lama butuh waktu melepas port 9995. Tanpa jeda,
+# nfcapd baru gagal bind lalu keluar diam-diam (terjadi 15 Nov 2026).
+docker exec "$COL" sh -c 'pkill nfcapd 2>/dev/null; sleep 2; mkdir -p /data/nfcapd; \
   nfcapd -D -p 9995 -t 60 -w /data/nfcapd'
-echo "  nfcapd jalan (port 9995, -t 60, /data/nfcapd)"
+sleep 2
+if docker exec "$COL" pgrep nfcapd >/dev/null; then
+  echo "  nfcapd jalan (port 9995, -t 60, /data/nfcapd)"
+else
+  echo "GAGAL: nfcapd tidak jalan di Collector — jalankan ulang langkah ini" >&2; exit 1
+fi
 
 # == Routing di HOST VM agar backend bisa SSH ke VyOS mgmt (opsional) ==
 # Sesuaikan subnet mgmt VyOS (contoh 192.168.42.0/24) dengan jaringanmu.

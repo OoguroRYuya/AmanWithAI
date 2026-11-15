@@ -55,7 +55,11 @@ fi
 # Berkas header berizin 600, dihapus saat skrip berhenti
 HEADER=$(mktemp)
 chmod 600 "$HEADER"
-trap 'rm -f "$HEADER"' EXIT INT TERM
+# PENTING: INT/TERM harus benar-benar keluar. Dulu trap INT/TERM hanya
+# menghapus berkas header lalu skrip JALAN TERUS tanpa header (pkill tidak
+# mematikannya; kirim berikutnya gagal "curl: option -H"). Bug 15 Nov 2026.
+trap 'rm -f "$HEADER"' EXIT
+trap 'exit 1' INT TERM
 printf 'Authorization: Bearer %s\n' "$(cat "$TOKEN_FILE")" > "$HEADER"
 
 daftar_file() {

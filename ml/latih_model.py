@@ -55,7 +55,6 @@ FITUR = [
     "avg_packet_size",
     "flow_rate",
     "syn_flag_count",
-    "unique_src_ip_per_dst",
     "protocol",
     "mean_packet_interval",
 ]
@@ -216,7 +215,7 @@ def tampilkan_feature_importance(model, nama):
     """
     Menampilkan kontribusi tiap fitur terhadap keputusan model (Gini/gain).
 
-    Analisis ini berguna untuk memvalidasi pemilihan sepuluh fitur secara
+    Analisis ini berguna untuk memvalidasi pemilihan sembilan fitur secara
     empiris, dan dapat dilampirkan pada pembahasan hasil penelitian.
     """
     if not hasattr(model, "feature_importances_"):

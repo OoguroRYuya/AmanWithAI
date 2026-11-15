@@ -50,7 +50,7 @@ def test_estimasi_paksa_mengganti_packet_count():
     harapan = (asli["byte_count"] / ef.ESTIMASI_UKURAN_PAKET).round().clip(lower=1)
     assert (paksa.loc[berisi, "packet_count"] == harapan[berisi]).all()
     # fitur yang tidak bergantung pada packet_count tidak berubah
-    for kolom in ("duration", "byte_count", "dst_port_count", "unique_src_ip_per_dst"):
+    for kolom in ("duration", "byte_count", "dst_port_count"):
         pd.testing.assert_series_equal(paksa[kolom], asli[kolom])
     assert not paksa["packet_count"].equals(asli["packet_count"])
 

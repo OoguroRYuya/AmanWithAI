@@ -69,7 +69,7 @@ log = logging.getLogger("ndr")
 FITUR = [
     "duration", "packet_count", "byte_count", "dst_port_count",
     "avg_packet_size", "flow_rate", "syn_flag_count",
-    "unique_src_ip_per_dst", "protocol", "mean_packet_interval",
+    "protocol", "mean_packet_interval",
 ]
 
 MAKS_RIWAYAT = 500
@@ -557,7 +557,6 @@ class FlowInput(BaseModel):
     avg_packet_size: float = 0.0
     flow_rate: float = 0.0
     syn_flag_count: int = 0
-    unique_src_ip_per_dst: int = 0
     protocol: int = 6
     mean_packet_interval: float = 0.0
 

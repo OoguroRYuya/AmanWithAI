@@ -1,7 +1,7 @@
 """
 ekstraksi_fitur.py
 ==================
-Mengubah flow record NetFlow (hasil nfdump) menjadi dataset berisi 10 fitur
+Mengubah flow record NetFlow (hasil nfdump) menjadi dataset berisi 9 fitur
 sesuai Tabel 3.3 pada proposal.
 
 Alur pemakaian:
@@ -11,9 +11,13 @@ Alur pemakaian:
     3. Jalankan:
          python ekstraksi_fitur.py flows.csv --label normal -o dataset_normal.csv
 
-Sepuluh fitur yang dihasilkan:
+Sembilan fitur yang dihasilkan:
     duration, packet_count, byte_count, dst_port_count, avg_packet_size,
-    flow_rate, syn_flag_count, unique_src_ip_per_dst, protocol, mean_packet_interval
+    flow_rate, syn_flag_count, protocol, mean_packet_interval
+
+Catatan (2026-11-15): unique_src_ip_per_dst DIHAPUS. Nilainya bergantung pada
+lalu lintas LAIN di jendela yang sama, sehingga model belajar jalan pintas
+(scan yang berjalan sendirian terbaca normal di uji lab).
 """
 
 import argparse
@@ -23,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 # Jendela waktu (detik) untuk menghitung fitur agregat seperti dst_port_count
-# dan unique_src_ip_per_dst. Nilai ini menentukan seberapa peka sistem
+# Nilai ini menentukan seberapa peka sistem
 # terhadap pola Port Scanning yang tersebar dalam waktu.
 WINDOW_SECONDS = 60
 
@@ -58,7 +62,6 @@ FEATURE_COLUMNS = [
     "avg_packet_size",
     "flow_rate",
     "syn_flag_count",
-    "unique_src_ip_per_dst",
     "protocol",
     "mean_packet_interval",
 ]
@@ -189,14 +192,12 @@ def hitung_syn_flag(flg):
 
 def hitung_fitur_agregat(df):
     """
-    Menghitung dua fitur yang tidak bisa diambil dari satu flow saja:
+    Menghitung fitur yang tidak bisa diambil dari satu flow saja:
 
-    - dst_port_count        : jumlah port tujuan unik yang diakses satu IP
-                              sumber dalam satu jendela waktu. Nilai tinggi
-                              merupakan indikator kuat Port Scanning.
-    - unique_src_ip_per_dst : jumlah IP sumber unik yang mengakses satu IP
-                              tujuan dalam satu jendela waktu. Nilai tinggi
-                              merupakan indikator serangan terdistribusi.
+    - dst_port_count : jumlah port tujuan unik yang diakses satu IP sumber
+                       dalam satu jendela waktu. Nilai tinggi merupakan
+                       indikator kuat Port Scanning. Fitur ini hanya
+                       bergantung pada perilaku sumber itu sendiri.
     """
     df = df.copy()
     df["window"] = (df["ts_epoch"] // WINDOW_SECONDS).astype("int64")
@@ -208,15 +209,7 @@ def hitung_fitur_agregat(df):
         .reset_index()
     )
 
-    src_per_dst = (
-        df.groupby(["window", "da"])["sa"]
-        .nunique()
-        .rename("unique_src_ip_per_dst")
-        .reset_index()
-    )
-
     df = df.merge(port_per_src, on=["window", "sa"], how="left")
-    df = df.merge(src_per_dst, on=["window", "da"], how="left")
 
     return df
 
@@ -240,11 +233,11 @@ def hitung_interval_paket(df):
 
 def ekstrak(path_csv, label=None, sertakan_ip=False, estimasi_paksa=False):
     """
-    Fungsi utama: membaca CSV nfdump dan mengembalikan DataFrame 10 fitur.
+    Fungsi utama: membaca CSV nfdump dan mengembalikan DataFrame 9 fitur.
 
     sertakan_ip : bool
         Bila True, kolom `sa`, `da`, `dp`, dan `window` (indeks jendela
-        WINDOW_SECONDS dari `ts`) ikut dikembalikan di belakang 10 fitur.
+        WINDOW_SECONDS dari `ts`) ikut dikembalikan di belakang 9 fitur.
         Kolom ini dibawa dari DataFrame yang sama, jadi urutan barisnya pasti
         cocok. Bila False, keluaran sama persis dengan sebelumnya.
     estimasi_paksa : bool
@@ -341,7 +334,7 @@ def ekstrak(path_csv, label=None, sertakan_ip=False, estimasi_paksa=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Ekstraksi 10 fitur NetFlow untuk penelitian NDR"
+        description="Ekstraksi 9 fitur NetFlow untuk penelitian NDR"
     )
     parser.add_argument("input", help="File CSV hasil `nfdump -o csv`")
     parser.add_argument(

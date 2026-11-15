@@ -7,7 +7,7 @@ dikelompokkan. Modul ini tidak bergantung pada FastAPI sehingga dapat diuji
 tanpa server.
 
 Alur proses_csv():
-    1. ekstraksi 10 fitur (beserta sa/da/dp/window) dari CSV
+    1. ekstraksi 9 fitur (beserta sa/da/dp/window) dari CSV
     2. buang backscatter, yaitu flow menuju subnet penyerang. Fitur agregat
        sudah dihitung dari seluruh flow, lalu barisnya dibuang, persis seperti
        pada pelabelan data latih (label_per_window.py)
