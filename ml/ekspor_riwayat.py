@@ -2,8 +2,9 @@
 Ekspor arsip riwayat backend (DIR_STATUS/riwayat.jsonl) ke CSV latensi.
 
 Arsip ditulis backend setiap insiden final (blokir otomatis, menunggu,
-disetujui, ditolak). Satu id bisa muncul lebih dari sekali; yang dipakai
-baris terakhirnya (keadaan final).
+disetujui, ditolak). Satu insiden bisa muncul lebih dari sekali; yang dipakai
+baris terakhirnya (keadaan final). Nomor id mulai lagi dari 1 setiap backend
+di-restart, jadi kunci insiden = (id, nama_file), bukan id saja.
 
 Pakai (dari akar repo):
   python ml/ekspor_riwayat.py                         # semua insiden
@@ -63,11 +64,11 @@ def main():
     else:
         final = {}
         for e in baca(Path(a.dir) / "riwayat.jsonl"):
-            final[e["id"]] = e
+            final[(e["id"], e.get("nama_file"))] = e
         data = [e for e in final.values()
                 if dalam_rentang(e.get("waktu"), a.sejak, a.sampai)
                 and (not a.kelas or e.get("kelas") == a.kelas)]
-        data.sort(key=lambda e: e["id"])
+        data.sort(key=lambda e: e.get("waktu") or "")
         kolom = KOLOM_INSIDEN
         baris = [{**{k: e.get(k) for k in kolom},
                   "deteksi_detik": e.get("latensi_detik", {}).get("deteksi"),
