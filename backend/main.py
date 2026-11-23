@@ -41,7 +41,7 @@ import logging
 import os
 import sys
 import tempfile
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -62,7 +62,7 @@ from ws import KoneksiWS
 sys.path.insert(0, str(cfg.DIR_REPO / "ml"))
 
 from mitigasi import MAKS_DURASI_MENIT, ModulMitigasi, ip_aman  # noqa: E402
-from saran_tindakan import susun_saran      # noqa: E402
+from saran_tindakan import susun_saran, terapkan_status  # noqa: E402
 
 log = logging.getLogger("ndr")
 
@@ -88,6 +88,17 @@ model = None
 label_kelas = None
 mitigator: Optional[ModulMitigasi] = None
 koneksi_ws: Optional[KoneksiWS] = None
+
+# Jendela yang sudah diproses, untuk menggabungkan flow terlambat (butir 41).
+# Flow panjang dapat diekspor nfcapd pada file menit berikutnya dengan stempel
+# waktu jendela asalnya. Tanpa penggabungan, jendela itu diproses dua kali:
+# insiden ganda muncul dan grafik ditimpa potongan kedua. Dengan cache ini,
+# flow terlambat digabung dengan flow jendela asalnya, fitur dihitung ulang
+# atas jendela utuh, dan insiden yang sama diperbarui (id tetap).
+# {window_idx: {"header", "baris", "entri": {(kelas, kunci, bagian): entri},
+#               "trafik": entri_trafik, "t_window_end"}}
+MAKS_JENDELA_CACHE = 15
+jendela_terproses: "OrderedDict[int, dict]" = OrderedDict()
 
 # Penghitung id monoton: id tidak berulang meski riwayat dipangkas
 _penghitung_id = itertools.count(1)
@@ -265,25 +276,65 @@ async def pekerja_antrean():
             antrean.task_done()
 
 
+def _klasifikasi_isi(isi):
+    """Menjalankan pipeline atas isi CSV (bytes) lewat file sementara."""
+    fd, path = tempfile.mkstemp(suffix=".csv", prefix="ndr_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(isi)
+        return pipeline.proses_csv(path, model)
+    finally:
+        os.remove(path)
+
+
 async def _proses_item(item):
     if model is None:
         raise RuntimeError("model belum dimuat")
 
-    # pipeline membaca dari path, jadi isi CSV ditulis ke file sementara
-    fd, path = tempfile.mkstemp(suffix=".csv", prefix="ndr_")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(item["isi"])
-        hasil_list = await asyncio.to_thread(pipeline.proses_csv, path, model)
-    finally:
-        os.remove(path)
-    t_klasifikasi = _sekarang()
+    # Isi CSV dipotong per jendela. Jendela yang sudah pernah diproses
+    # digabung dengan flow lamanya lalu diproses ulang sebagai satu jendela
+    # utuh (butir 41); jendela baru diproses seperti biasa.
+    header, potongan = pipeline.potong_isi(item["isi"])
+    for w in sorted(potongan):
+        lama = jendela_terproses.get(w)
+        if lama is None and jendela_terproses and w < min(jendela_terproses):
+            log.warning(f"Flow terlambat untuk jendela {pipeline.label_window(w)} "
+                        "di luar cache; diproses sebagai jendela tersendiri")
+        if lama is not None:
+            # Baris identik (mis. file yang dikirim ulang) tidak dihitung dua kali
+            sudah = set(lama["baris"])
+            baru = [b for b in potongan[w] if b not in sudah]
+            if not baru:
+                log.info(f"{item.get('nama')}: tidak ada flow baru untuk jendela "
+                         f"{pipeline.label_window(w)}")
+                continue
+            log.info(f"{item.get('nama')}: {len(baru)} flow terlambat digabung ke jendela "
+                     f"{pipeline.label_window(w)}")
+        else:
+            baru = potongan[w]
+        baris = (lama["baris"] if lama else []) + baru
+        isi = ((lama["header"] if lama else header) + "".join(baris)).encode()
+        hasil_list = await asyncio.to_thread(_klasifikasi_isi, isi)
+        t_klasifikasi = _sekarang()
+        for hw in hasil_list:
+            await _proses_window(hw, item, t_klasifikasi, w=w, baris=baris,
+                                 header=lama["header"] if lama else header)
 
-    for hw in hasil_list:
-        await _proses_window(hw, item, t_klasifikasi)
+
+def _simpan_cache(w, data):
+    jendela_terproses[w] = data
+    jendela_terproses.move_to_end(w)
+    while len(jendela_terproses) > MAKS_JENDELA_CACHE:
+        jendela_terproses.popitem(last=False)
 
 
-async def _proses_window(hw, item, t_klasifikasi):
+# Bidang insiden yang diperbarui saat jendela digabung dengan flow terlambat
+_BIDANG_INSIDEN = ("jumlah_flow", "sumber", "tujuan", "confidence", "packet_total",
+                   "byte_total", "dst_port_maks")
+
+
+async def _proses_window(hw, item, t_klasifikasi, w=None, baris=None, header=None):
+    lama = jendela_terproses.get(w) if w is not None else None
     kep = kp.putuskan(hw)
     n_baru = kp.pemutus_darurat(
         kep, set(mitigator.terblokir) if mitigator else set(), cfg.MAKS_BLOKIR_BARU_PER_JENDELA
@@ -299,29 +350,55 @@ async def _proses_window(hw, item, t_klasifikasi):
     # Mode ingest: akhir jendela diambil dari stempel waktu flow (jam
     # Collector). Mode replay: saat potongan jendela dikirim pemutar,
     # yang mensimulasikan nfcapd menutup file.
-    t_window_end = item.get("t_window_end") or pipeline.akhir_window(hw.window_epoch).to_pydatetime()
+    if lama is not None:
+        # Waktu akhir jendela tetap milik potongan pertama, sehingga latensi
+        # deteksi insiden yang sudah ada tidak berubah oleh flow terlambat
+        t_window_end = lama["t_window_end"]
+    else:
+        t_window_end = (item.get("t_window_end")
+                        or pipeline.akhir_window(hw.window_epoch).to_pydatetime())
     t_diterima = item["t_diterima"]
 
-    entri_trafik = {
+    ringkas_trafik = {
         "window": hw.window,
         "per_kelas": hw.per_kelas,
         "byte_total": hw.byte_total,
         "jumlah_backscatter": hw.jumlah_backscatter,
-        "jumlah_insiden": len(kep.keputusan),
+        "jumlah_insiden": len({(k.insiden.kelas, k.insiden.kunci) for k in kep.keputusan}),
         "jumlah_diabaikan": kep.jumlah_diabaikan,
-        "sumber_data": item["sumber"],
-        "t_window_end": _iso(t_window_end),
-        "t_diterima": _iso(t_diterima),
-        "t_klasifikasi": _iso(t_klasifikasi),
     }
-    trafik.append(entri_trafik)
+    if lama is not None:
+        # Jendela digabung: ringkasan jendela diganti hitungan jendela utuh,
+        # bukan ditimpa potongan kedua saja
+        entri_trafik = lama["trafik"]
+        entri_trafik.update(ringkas_trafik)
+        entri_trafik["jumlah_pembaruan"] = entri_trafik.get("jumlah_pembaruan", 0) + 1
+        entri_trafik["t_diperbarui"] = _iso(t_klasifikasi)
+    else:
+        entri_trafik = {
+            **ringkas_trafik,
+            "sumber_data": item["sumber"],
+            "t_window_end": _iso(t_window_end),
+            "t_diterima": _iso(t_diterima),
+            "t_klasifikasi": _iso(t_klasifikasi),
+            "jumlah_pembaruan": 0,
+        }
+        trafik.append(entri_trafik)
     _arsipkan(cfg.BERKAS_ARSIP_TRAFIK, entri_trafik)
     await _siarkan({"tipe": "trafik", **entri_trafik})
 
+    entri_cache = dict(lama["entri"]) if lama is not None else {}
     entri_list = []
     for k in kep.keputusan:
         d = k.ke_dict()
         ins = d.pop("insiden")
+        kunci = (ins["kelas"], ins["kunci"], d["bagian"])
+        ada = entri_cache.get(kunci)
+        if ada is not None:
+            _perbarui_entri(ada, ins, d, item, t_klasifikasi)
+            ada["_t_window_end"] = t_window_end
+            entri_list.append(ada)
+            continue
         entri = _catat({
             "waktu": _iso(_sekarang()),
             "jenis": "insiden",
@@ -341,12 +418,23 @@ async def _proses_window(hw, item, t_klasifikasi):
             },
         })
         entri["_t_window_end"] = t_window_end
+        entri["jumlah_pembaruan"] = 0
         entri_list.append(entri)
+        entri_cache[kunci] = entri
 
         if k.status == kp.MENUNGGU_PERSETUJUAN:
             antrean_persetujuan[entri["id"]] = entri
             while len(antrean_persetujuan) > MAKS_PERSETUJUAN:
                 antrean_persetujuan.pop(next(iter(antrean_persetujuan)))
+
+    if w is not None:
+        _simpan_cache(w, {
+            "header": header,
+            "baris": baris,
+            "entri": entri_cache,
+            "trafik": entri_trafik,
+            "t_window_end": t_window_end,
+        })
 
     # Seluruh IP blokir otomatis dari jendela ini dikirim dalam satu sesi
     ips = kep.ip_blokir
@@ -361,14 +449,18 @@ async def _proses_window(hw, item, t_klasifikasi):
         ))
         _audit("blokir", "otomatis", window=hw.window, ip=sorted(diblokir),
                gagal=sorted(set(ips) - diblokir), durasi_menit=cfg.DURASI_BLOKIR_MENIT,
+               tahap_router=(mitigator.hasil_terakhir or {}).get("tahap"),
                insiden=[e["id"] for e in entri_list if e["status"] == kp.BLOKIR_OTOMATIS],
                dry_run=cfg.DRY_RUN)
         t_mitigasi = _sekarang()
         for e in entri_list:
             if e["status"] == kp.BLOKIR_OTOMATIS:
                 e["dimitigasi"] = bool(diblokir) and set(e["ip_blokir"]) <= diblokir
-                e["t_mitigasi"] = _iso(t_mitigasi)
-                e["latensi_detik"]["mitigasi"] = _selisih_detik(t_mitigasi, e["_t_window_end"])
+                # Insiden yang diperbarui oleh flow terlambat mempertahankan
+                # waktu mitigasi pertamanya
+                if not e.get("t_mitigasi"):
+                    e["t_mitigasi"] = _iso(t_mitigasi)
+                    e["latensi_detik"]["mitigasi"] = _selisih_detik(t_mitigasi, e["_t_window_end"])
 
     for e in entri_list:
         del e["_t_window_end"]
@@ -387,6 +479,34 @@ async def _proses_window(hw, item, t_klasifikasi):
         f"({kep.jumlah_diabaikan} diabaikan < MIN_FLOW_INSIDEN), "
         f"{len(ips)} IP diblokir otomatis, {len(kep.menunggu)} menunggu persetujuan"
     )
+
+
+def _perbarui_entri(entri, ins, d, item, t_klasifikasi):
+    """
+    Memperbarui insiden yang sudah ada dengan hasil jendela gabungan (flow
+    terlambat, butir 41). Id, waktu deteksi pertama, dan latensi deteksi
+    tidak berubah. Keputusan admin (disetujui/ditolak) tidak ditimpa.
+    """
+    for b in _BIDANG_INSIDEN:
+        entri[b] = ins[b]
+    entri["jumlah_sumber"] = len(ins["sumber"])
+    entri["evaluasi_sumber"] = d["evaluasi_sumber"]
+    entri["jumlah_pembaruan"] = entri.get("jumlah_pembaruan", 0) + 1
+    entri["t_diperbarui"] = _iso(t_klasifikasi)
+    entri["nama_file_pembaruan"] = item.get("nama")
+    if entri["status"] in ("disetujui", "ditolak"):
+        return
+    entri.update({
+        "status": d["status"],
+        "alasan": d["alasan"],
+        "ip_blokir": sorted(set(entri.get("ip_blokir", [])) | set(d["ip_blokir"])),
+        "ip_kandidat": d["ip_kandidat"],
+        "saran": d["saran"],
+    })
+    if d["status"] == kp.MENUNGGU_PERSETUJUAN:
+        antrean_persetujuan[entri["id"]] = entri
+    else:
+        antrean_persetujuan.pop(entri["id"], None)
 
 
 # ------------------------------------------------------------- mode replay
@@ -469,6 +589,14 @@ async def lifespan(app: FastAPI):
         print(f"PERINGATAN: {n} kosong; fiturnya terkunci sampai diisi (python keamanan.py)")
     if not cfg.DRY_RUN and not cfg.ROUTER_KEY_FILE and cfg.ROUTER_PASS == "vyos":
         print("PERINGATAN: router memakai password bawaan 'vyos'; disarankan ROUTER_KEY_FILE")
+
+    # Butir 28: backend bisa dijalankan ulang tanpa me-restart VyOS. Daftar
+    # blokir backend disamakan dulu dengan isi BLOKIR_NDR di router.
+    if not cfg.DRY_RUN:
+        sinkron = await asyncio.to_thread(mitigator.sinkronkan_router, cfg.DURASI_BLOKIR_MENIT)
+        _audit("sinkron_router", "otomatis", hasil=sinkron)
+        if sinkron is None:
+            print("PERINGATAN: router tidak terbaca saat startup; daftar blokir belum disinkronkan")
 
     koneksi_ws = KoneksiWS()
 
@@ -936,6 +1064,7 @@ async def setujui(id_insiden: int,
         "ip_blokir": diblokir,
         "t_mitigasi": _iso(t),
     })
+    terapkan_status(entri.get("saran"), "disetujui", durasi)
     # Latensi mitigasi di sini mencakup waktu tunggu keputusan admin
     entri["latensi_detik"]["mitigasi"] = _selisih_detik(
         t, datetime.fromisoformat(entri["t_window_end"])
@@ -952,6 +1081,7 @@ async def tolak(id_insiden: int):
     """Menolak pemblokiran; insiden tetap tercatat dengan status ditolak."""
     entri = _ambil_menunggu(id_insiden)
     entri["status"] = "ditolak"
+    terapkan_status(entri.get("saran"), "ditolak")
     antrean_persetujuan.pop(id_insiden, None)
     _audit("tolak", "admin", insiden=id_insiden, ip_kandidat=entri["ip_kandidat"])
     _arsipkan(cfg.BERKAS_ARSIP_RIWAYAT, entri)
@@ -993,6 +1123,19 @@ async def umpan_ws(ws: WebSocket):
         pass
     finally:
         koneksi_ws.disconnect(ws)
+
+
+@admin.post("/api/sinkron-router")
+async def sinkron_router():
+    """Menyamakan daftar blokir backend dengan BLOKIR_NDR di router (butir 28)."""
+    if not mitigator:
+        raise HTTPException(503, "Modul mitigasi belum siap")
+    hasil = await _mitigasi(mitigator.sinkronkan_router, cfg.DURASI_BLOKIR_MENIT)
+    _audit("sinkron_router", "admin", hasil=hasil)
+    if hasil is None:
+        raise HTTPException(502, "Router tidak dapat dibaca")
+    await _siarkan_status()
+    return hasil
 
 
 @admin.post("/api/setup-firewall")

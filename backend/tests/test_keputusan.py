@@ -160,7 +160,10 @@ def test_tanpa_sumber_lolos_rasio_hanya_dicatat():
     [k] = putuskan(baris).keputusan
     assert k.status == kp.DICATAT
     assert k.ip_blokir == [] and k.ip_kandidat == []
-    assert "Catatan" in k.saran["narasi"]
+    # butir 46: narasi insiden DICATAT tidak menyarankan pemblokiran
+    assert "Pemblokiran tidak disarankan" in k.saran["narasi"]
+    assert "Disarankan melakukan pemblokiran" not in k.saran["narasi"]
+    assert k.saran["mitigasi_otomatis"] is False
 
 
 def test_sumber_ragu_dalam_insiden_yang_diblokir():
@@ -171,12 +174,50 @@ def test_sumber_ragu_dalam_insiden_yang_diblokir():
               for _ in range(5)]
     baris += [flow("192.168.20.201", KORBAN, "ddos_flood", confidence=0.65)
               for _ in range(5)]
-    [k] = putuskan(baris).keputusan
+    # butir 26: sumber 0.65 (di antara AMBANG_SEDANG dan AMBANG_CONF_BLOKIR)
+    # tidak hilang, tetapi diajukan sebagai keputusan menunggu persetujuan
+    k, k2 = putuskan(baris).keputusan
     assert k.status == kp.BLOKIR_OTOMATIS
     assert "192.168.20.200" in k.ip_blokir
     assert "192.168.20.201" not in k.ip_blokir
     ev = {e.ip: e for e in k.evaluasi_sumber}
     assert "confidence" in ev["192.168.20.201"].alasan
+    assert k2.status == kp.MENUNGGU_PERSETUJUAN
+    assert k2.ip_kandidat == ["192.168.20.201"] and k2.ip_blokir == []
+    assert k2.insiden.kunci == k.insiden.kunci
+
+
+def test_contoh_tiga_ip_satu_insiden():
+    # butir 26, contoh di naskah: satu insiden flood dengan tiga sumber,
+    # satu lolos blokir, satu kandidat persetujuan, satu ditolak gerbang
+    baris = [flow("192.168.20.150", KORBAN, "ddos_flood", confidence=0.95) for _ in range(20)]
+    baris += [flow("192.168.20.151", KORBAN, "ddos_flood", confidence=0.60) for _ in range(5)]
+    baris += [flow("192.168.20.152", KORBAN, "ddos_flood", confidence=0.40) for _ in range(5)]
+    hasil = putuskan(baris)
+    status = {k.status: k for k in hasil.keputusan}
+    assert set(status) == {kp.BLOKIR_OTOMATIS, kp.MENUNGGU_PERSETUJUAN}
+    assert status[kp.BLOKIR_OTOMATIS].ip_blokir == ["192.168.20.150"]
+    assert status[kp.MENUNGGU_PERSETUJUAN].ip_kandidat == ["192.168.20.151"]
+    semua = {ip for k in hasil.keputusan for ip in k.ip_blokir + k.ip_kandidat}
+    assert "192.168.20.152" not in semua
+    assert hasil.ip_blokir == ["192.168.20.150"]
+    assert [k.ip_kandidat for k in hasil.menunggu] == [["192.168.20.151"]]
+    # narasi tiap keputusan sesuai statusnya
+    assert "telah memblokir" in status[kp.BLOKIR_OTOMATIS].saran["narasi"]
+    assert "menunggu persetujuan" in status[kp.MENUNGGU_PERSETUJUAN].saran["narasi"]
+
+
+def test_allowlist_cidr():
+    # butir 25: allowlist boleh berupa jaringan, mis. jaringan manajemen
+    baris = flood_palsu(30, conf=0.99)
+    hasil = putuskan(baris, allowlist={"192.168.20.48/28"})  # .48 sampai .63
+    [k] = hasil.keputusan
+    ev = {e.ip: e for e in k.evaluasi_sumber}
+    for ip, e in ev.items():
+        di_jaringan = 48 <= int(ip.rsplit(".", 1)[1]) <= 63
+        assert (e.alasan == "ada di allowlist") == di_jaringan
+        assert e.lolos != di_jaringan
+    assert "192.168.20.50" not in k.ip_blokir and "192.168.20.70" in k.ip_blokir
 
 
 def test_klien_kampus_tidak_pernah_diblokir():

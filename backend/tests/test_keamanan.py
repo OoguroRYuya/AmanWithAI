@@ -242,9 +242,11 @@ def test_ip_klien_dipalsukan_tidak_diblokir_otomatis():
 def test_subnet_terlindungi_dan_penyerang_dalam_satu_insiden():
     baris = [flow(f"192.168.20.{i}", KORBAN, "ddos_flood", confidence=0.99) for i in range(50, 75)]
     baris += [flow("192.168.10.12", KORBAN, "ddos_flood", confidence=0.99) for _ in range(5)]
-    [k] = putuskan(baris).keputusan
+    k, k2 = putuskan(baris).keputusan
     assert k.status == kp.BLOKIR_OTOMATIS
     assert "192.168.10.12" not in k.ip_blokir and len(k.ip_blokir) == 25
+    # butir 26: klien terlindungi tidak hilang dari antrean persetujuan
+    assert k2.status == kp.MENUNGGU_PERSETUJUAN and k2.ip_kandidat == ["192.168.10.12"]
 
 
 def test_tanpa_subnet_terlindungi_perilaku_lama():

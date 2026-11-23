@@ -72,6 +72,75 @@ TEMPLATE = {
 }
 
 
+# Status keputusan mitigasi (sama dengan konstanta di backend/keputusan.py).
+# Bila status diberikan, kalimat tindakan mengikuti keputusan sistem, bukan
+# confidence saja, sehingga narasi tidak pernah menyarankan pemblokiran
+# untuk insiden yang hanya dicatat (koreksi Pak Deni butir 46).
+STATUS_BLOKIR_OTOMATIS = "blokir_otomatis"
+STATUS_MENUNGGU = "menunggu_persetujuan"
+STATUS_DICATAT = "dicatat"
+STATUS_DISETUJUI = "disetujui"
+STATUS_DITOLAK = "ditolak"
+
+TINDAKAN_STATUS = {
+    STATUS_BLOKIR_OTOMATIS: (
+        "Sistem telah memblokir alamat IP {src_ip} secara otomatis pada router "
+        "selama {durasi_blokir} menit. Pantau apakah aktivitas serupa berulang "
+        "setelah blokir dicabut."
+    ),
+    STATUS_MENUNGGU: (
+        "Pemblokiran alamat IP {src_ip} menunggu persetujuan administrator. "
+        "Tinjau rasio serangan dan confidence setiap sumber sebelum menyetujui "
+        "atau menolak."
+    ),
+    STATUS_DICATAT: (
+        "Insiden ini hanya dicatat karena tidak ada sumber yang memenuhi gerbang "
+        "rasio serangan dan confidence. Pemblokiran tidak disarankan; pantau "
+        "alamat IP {src_ip} bila aktivitas berlanjut."
+    ),
+    STATUS_DISETUJUI: (
+        "Administrator menyetujui pemblokiran alamat IP {src_ip} selama "
+        "{durasi_blokir} menit."
+    ),
+    STATUS_DITOLAK: (
+        "Administrator menolak pemblokiran alamat IP {src_ip}. Insiden tetap "
+        "tercatat tanpa perubahan pada router."
+    ),
+}
+
+TAMBAHAN_SCANNING = (
+    " Tinjau juga log akses pada {dst_ip} untuk memastikan tidak ada layanan "
+    "yang berhasil diakses selama pemindaian."
+)
+
+
+def tindakan_untuk_status(kelas, status, src_ip, dst_ip, durasi_blokir=15):
+    """Kalimat tindakan yang konsisten dengan status keputusan mitigasi."""
+    teks = TINDAKAN_STATUS[status].format(src_ip=src_ip, durasi_blokir=durasi_blokir)
+    if kelas == "port_scanning" and status in (STATUS_BLOKIR_OTOMATIS, STATUS_DISETUJUI):
+        teks += TAMBAHAN_SCANNING.format(dst_ip=dst_ip)
+    return teks
+
+
+def terapkan_status(saran, status, durasi_blokir=None):
+    """
+    Memperbarui saran yang sudah ada setelah status insiden berubah
+    (pemutus darurat, disetujui, ditolak). Mengubah dict di tempat dan
+    mengembalikannya.
+    """
+    if not saran or saran.get("kelas") not in TEMPLATE:
+        return saran
+    durasi = durasi_blokir if durasi_blokir is not None else saran.get("durasi_blokir", 15)
+    tindakan = tindakan_untuk_status(
+        saran["kelas"], status, saran.get("src_ip", "-"), saran.get("dst_ip", "-"), durasi
+    )
+    saran["saran_mitigasi"] = tindakan
+    saran["narasi"] = f"{saran['deskripsi']}\n\n{saran['dampak']}\n\n{tindakan}"
+    saran["mitigasi_otomatis"] = status == STATUS_BLOKIR_OTOMATIS
+    saran["status"] = status
+    return saran
+
+
 def susun_saran(
     kelas,
     src_ip,
@@ -85,6 +154,7 @@ def susun_saran(
     durasi_blokir=15,
     ambang_tinggi=AMBANG_TINGGI,
     ambang_sedang=AMBANG_SEDANG,
+    status=None,
 ):
     """
     Menyusun narasi saran tindakan untuk satu hasil deteksi.
@@ -101,6 +171,12 @@ def susun_saran(
         Usulan lama pemblokiran dalam menit
     ambang_tinggi, ambang_sedang : float
         Ambang kepercayaan; default AMBANG_TINGGI / AMBANG_SEDANG
+    status : str | None
+        Status keputusan mitigasi insiden. Bila diisi, kalimat tindakan
+        mengikuti status ini (TINDAKAN_STATUS) dan mitigasi_otomatis True
+        hanya untuk blokir_otomatis. Bila None (uji satu flow), tindakan
+        mengikuti confidence dan tidak pernah berupa pemblokiran yang sudah
+        dijalankan.
 
     Mengembalikan dict berisi judul, tingkat risiko, narasi, dan flag
     apakah mitigasi otomatis disarankan.
@@ -147,7 +223,10 @@ def susun_saran(
     # Tingkat kepercayaan menentukan apakah sistem menyarankan mitigasi
     # otomatis atau cukup pemantauan. Ini mengurangi risiko pemblokiran
     # alamat IP yang sebenarnya sah.
-    if confidence >= ambang_tinggi:
+    if status is not None:
+        tindakan = tindakan_untuk_status(kelas, status, src_ip, dst_ip, durasi_blokir)
+        otomatis = status == STATUS_BLOKIR_OTOMATIS
+    elif confidence >= ambang_tinggi:
         tindakan = t["tindakan_tinggi"].format(**konteks)
         otomatis = True
     elif confidence >= ambang_sedang:
@@ -177,6 +256,7 @@ def susun_saran(
         "dst_ip": dst_ip,
         "waktu": waktu,
         "durasi_blokir": durasi_blokir,
+        "status": status,
     }
 
 

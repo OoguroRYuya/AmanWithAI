@@ -1,3 +1,4 @@
+from pathlib import Path
 import pandas as pd
 import pytest
 
@@ -73,12 +74,22 @@ def test_potong_per_window_fixture_satu_jendela():
     assert isi.decode() == FIXTURE_CSV.read_text()
 
 
-@pytest.mark.skipif(not SESI4_CSV.exists(), reason="flows_sesi4.csv tidak tersedia")
-def test_potong_per_window_fitur_sama_dengan_file_utuh(tmp_path):
+# Butir 36: tanpa flows_sesi4.csv (tidak ada di repositori karena besar),
+# tes memakai fixture kecil tiga jendela agar tetap dijalankan
+TIGA_JENDELA_CSV = Path(__file__).parent / "data" / "potongan_tiga_jendela.csv"
+
+
+@pytest.mark.parametrize("sumber", ["fixture", "sesi4"])
+def test_potong_per_window_fitur_sama_dengan_file_utuh(tmp_path, sumber):
     """Replay per jendela harus menghasilkan fitur yang sama dengan file utuh."""
-    utuh = ef.ekstrak(SESI4_CSV, sertakan_ip=True)
+    if sumber == "sesi4" and not SESI4_CSV.exists():
+        pytest.skip("flows_sesi4.csv tidak tersedia; versi fixture tetap dijalankan")
+    csv = SESI4_CSV if sumber == "sesi4" else TIGA_JENDELA_CSV
+    utuh = ef.ekstrak(csv, sertakan_ip=True)
+    if sumber == "fixture":
+        assert utuh["window"].nunique() == 3
     bagian = []
-    for i, (w, isi) in enumerate(pipeline.potong_per_window(SESI4_CSV)):
+    for i, (w, isi) in enumerate(pipeline.potong_per_window(csv)):
         p = tmp_path / f"w{i}.csv"
         p.write_bytes(isi)
         bagian.append(ef.ekstrak(p, sertakan_ip=True))

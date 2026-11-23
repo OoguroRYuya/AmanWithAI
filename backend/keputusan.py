@@ -16,6 +16,9 @@ Aturan untuk setiap insiden dalam satu jendela:
         ada sumber lolos  -> blokir_otomatis
         ada kandidat      -> menunggu_persetujuan
         selain itu        -> dicatat
+      bila satu insiden memuat sumber lolos DAN kandidat, keputusannya dipecah
+      menjadi dua: blokir_otomatis untuk sumber lolos dan menunggu_persetujuan
+      untuk kandidat, sehingga kandidat tidak hilang (koreksi Pak Deni butir 26)
       kandidat persetujuan = sumber dengan rasio >= AMBANG_RASIO_SERANGAN
       yang tidak ada di ALLOWLIST dan AMBANG_SEDANG <= conf_rata <
       AMBANG_CONF_BLOKIR; di bawah AMBANG_SEDANG sumber hanya dicatat
@@ -49,7 +52,7 @@ sys.path.insert(0, str(cfg.DIR_REPO / "ml"))
 
 import ekstraksi_fitur as ef  # noqa: E402
 from mitigasi import ip_aman  # noqa: E402
-from saran_tindakan import susun_saran  # noqa: E402
+from saran_tindakan import susun_saran, terapkan_status  # noqa: E402
 
 BLOKIR_OTOMATIS = "blokir_otomatis"
 MENUNGGU_PERSETUJUAN = "menunggu_persetujuan"
@@ -88,6 +91,9 @@ class KeputusanInsiden:
     ip_kandidat: List[str]
     evaluasi_sumber: List[EvaluasiSumber]
     saran: dict
+    # "utama", atau "kandidat" untuk keputusan pecahan berisi sumber
+    # kandidat dari insiden yang sumber lainnya diblokir otomatis (butir 26)
+    bagian: str = "utama"
 
     def ke_dict(self):
         return asdict(self)
@@ -120,6 +126,19 @@ def _ip_valid(ip):
         return False
 
 
+def di_allowlist(ip, allowlist):
+    """
+    True bila ip ada di allowlist. Entri allowlist boleh berupa satu alamat
+    atau jaringan CIDR (mis. jaringan manajemen, DNS, layanan autentikasi),
+    sehingga perluasan daftar lindung pada jaringan nyata cukup lewat .env
+    (koreksi Pak Deni butir 25).
+    """
+    if ip in allowlist:
+        return True
+    jaringan = [a for a in allowlist if "/" in a]
+    return bool(jaringan) and di_subnet(ip, jaringan)
+
+
 def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, ambang_sedang, allowlist,
                     terlindung=False):
     stat = per_sumber.get(ip, {})
@@ -131,7 +150,8 @@ def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, ambang_sedang, al
 
     # Semua perbandingan ambang memakai _memenuhi (tak dibulatkan + toleransi)
     # supaya gerbang blokir dan antrean konsisten di nilai batas.
-    if ip in allowlist:
+    di_lindung = di_allowlist(ip, allowlist)
+    if di_lindung:
         alasan = "ada di allowlist"
     elif not valid:
         alasan = "bukan alamat IPv4 host yang valid"
@@ -153,7 +173,7 @@ def evaluasi_sumber(ip, per_sumber, ambang_rasio, ambang_conf, ambang_sedang, al
     kandidat = (
         not lolos
         and valid
-        and ip not in allowlist
+        and not di_lindung
         and _memenuhi(rasio, ambang_rasio)
         and _memenuhi(conf, ambang_sedang)
         and (terlindung or not _memenuhi(conf, ambang_conf))
@@ -179,7 +199,7 @@ def pemutus_darurat(hasil, sudah_terblokir, batas):
             k.ip_kandidat, k.ip_blokir = k.ip_blokir, []
             k.alasan = (f"pemutus darurat: {len(baru)} IP baru dalam satu jendela "
                         f"melebihi batas {batas}; perlu persetujuan admin")
-            k.saran["mitigasi_otomatis"] = False
+            terapkan_status(k.saran, MENUNGGU_PERSETUJUAN)
     return len(baru)
 
 
@@ -212,16 +232,9 @@ def _saran(ins, status, evals_utama, ambang_conf, ambang_sedang, durasi_blokir):
         durasi_blokir=durasi_blokir,
         ambang_tinggi=ambang_conf,
         ambang_sedang=min(ambang_sedang, ambang_conf),
+        # Kalimat tindakan mengikuti status keputusan (butir 46)
+        status=status,
     )
-    otomatis = status == BLOKIR_OTOMATIS
-    if saran.get("mitigasi_otomatis") and not otomatis:
-        catatan = (
-            "Catatan: pemblokiran otomatis tidak dijalankan karena tidak ada "
-            "sumber yang lolos gerbang rasio serangan, confidence, dan allowlist."
-        )
-        saran["saran_mitigasi"] = f"{saran['saran_mitigasi']} {catatan}"
-        saran["narasi"] = f"{saran['narasi']}\n\n{catatan}"
-    saran["mitigasi_otomatis"] = otomatis
     return saran
 
 
@@ -260,11 +273,29 @@ def putuskan(
         lolos = [e for e in evals if e.lolos]
         kandidat = [e for e in evals if e.kandidat]
 
+        def _tambah(status, alasan, utama, ip_blokir, ip_kandidat, bagian="utama"):
+            keluaran.keputusan.append(KeputusanInsiden(
+                insiden=ins,
+                status=status,
+                alasan=alasan,
+                ip_blokir=ip_blokir,
+                ip_kandidat=ip_kandidat,
+                evaluasi_sumber=evals,
+                saran=_saran(ins, status, utama, ambang_conf, ambang_sedang, durasi_blokir),
+                bagian=bagian,
+            ))
+
         if lolos:
-            status = BLOKIR_OTOMATIS
-            alasan = f"{len(lolos)} dari {len(evals)} sumber lolos gerbang"
-            utama = lolos
-            ip_blokir, ip_kandidat = [e.ip for e in lolos], []
+            _tambah(BLOKIR_OTOMATIS, f"{len(lolos)} dari {len(evals)} sumber lolos gerbang",
+                    lolos, [e.ip for e in lolos], [])
+            if kandidat:
+                # Sumber kandidat pada insiden yang sama tetap diajukan ke
+                # antrean persetujuan sebagai keputusan terpisah (butir 26)
+                _tambah(MENUNGGU_PERSETUJUAN,
+                        f"{len(kandidat)} sumber lain pada insiden yang sama perlu "
+                        f"persetujuan admin",
+                        kandidat, [], [e.ip for e in kandidat], bagian="kandidat")
+            continue
         elif kandidat:
             status = MENUNGGU_PERSETUJUAN
             n_lindung = sum(e.ip in terlindung for e in kandidat)
@@ -285,14 +316,6 @@ def putuskan(
             utama = []
             ip_blokir, ip_kandidat = [], []
 
-        keluaran.keputusan.append(KeputusanInsiden(
-            insiden=ins,
-            status=status,
-            alasan=alasan,
-            ip_blokir=ip_blokir,
-            ip_kandidat=ip_kandidat,
-            evaluasi_sumber=evals,
-            saran=_saran(ins, status, utama, ambang_conf, ambang_sedang, durasi_blokir),
-        ))
+        _tambah(status, alasan, utama, ip_blokir, ip_kandidat)
 
     return keluaran

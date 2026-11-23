@@ -19,6 +19,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 
 logging.basicConfig(
@@ -35,6 +36,23 @@ FIREWALL_GROUP = "BLOKIR_NDR"
 
 # Batas lama satu pemblokiran (menit)
 MAKS_DURASI_MENIT = 1440
+
+# Keluaran VyOS yang menandakan perintah atau commit gagal
+POLA_GAGAL = re.compile(r"(?i)(commit failed|failed|error|invalid|not valid|is not a valid)")
+# Baris konfigurasi anggota address-group pada `show configuration commands`
+POLA_ANGGOTA = re.compile(
+    r"address-group\s+" + FIREWALL_GROUP + r"\s+address\s+'?(\d{1,3}(?:\.\d{1,3}){3})'?"
+)
+
+
+def keluaran_gagal(teks):
+    """True bila keluaran router memuat tanda kegagalan."""
+    return bool(teks) and bool(POLA_GAGAL.search(str(teks)))
+
+
+def anggota_grup(teks):
+    """Himpunan IP anggota BLOKIR_NDR dari keluaran `show configuration commands`."""
+    return set(POLA_ANGGOTA.findall(str(teks or "")))
 
 
 def ip_aman(ip):
@@ -98,6 +116,11 @@ class ModulMitigasi:
         self.dry_run = dry_run
         self.berkas_status = berkas_status
         self.terblokir = {}  # {ip: waktu_kedaluwarsa}
+        # Rincian eksekusi router terakhir (koreksi Pak Deni butir 27):
+        # tahap = "dikirim" (perintah terkirim tetapi commit gagal),
+        # "commit_ok" (commit berhasil, belum/tidak terverifikasi), atau
+        # "terverifikasi" (aturan terbaca aktif di konfigurasi router)
+        self.hasil_terakhir = None
         self._muat_status()
 
     # -------------------------------------------------------------- status
@@ -162,34 +185,73 @@ class ModulMitigasi:
             **kredensial,
         )
 
-    def _jalankan(self, perintah_list, deskripsi):
+    def _baca_grup(self, koneksi, mode_konfigurasi=True):
+        """Membaca anggota BLOKIR_NDR yang sedang aktif di konfigurasi router."""
+        perintah = f"show configuration commands | match {FIREWALL_GROUP}"
+        if mode_konfigurasi:
+            perintah = "run " + perintah
+        return anggota_grup(koneksi.send_command(perintah, expect_string=r"[$#]"))
+
+    def _jalankan(self, perintah_list, deskripsi, periksa=None, harus_ada=True):
         """
         Mengirim sekumpulan perintah konfigurasi ke router.
 
-        Mengembalikan True bila berhasil, False bila gagal. Kegagalan
-        dicatat di log tetapi tidak menghentikan program, karena sistem
-        deteksi harus tetap berjalan meski mitigasi gagal.
+        Mengembalikan True hanya bila commit berhasil. Keluaran commit dan
+        save diperiksa, bukan dianggap berhasil begitu terkirim. Bila
+        `periksa` berisi daftar IP, konfigurasi router dibaca ulang setelah
+        commit untuk memastikan IP tersebut benar-benar ada (harus_ada=True)
+        atau sudah hilang (harus_ada=False) dari BLOKIR_NDR. Rinciannya
+        disimpan di self.hasil_terakhir. Kegagalan dicatat di log tetapi
+        tidak menghentikan program, karena sistem deteksi harus tetap
+        berjalan meski mitigasi gagal.
         """
         if self.dry_run:
             log.info(f"[DRY RUN] {deskripsi}")
             for p in perintah_list:
                 log.info(f"[DRY RUN]   {p}")
+            self.hasil_terakhir = {"tahap": "dry_run", "tersimpan": False,
+                                   "terverifikasi": list(periksa) if periksa is not None else None}
             return True
 
         koneksi = None
+        hasil = {"tahap": "dikirim", "tersimpan": False, "terverifikasi": None}
+        self.hasil_terakhir = hasil
         try:
             koneksi = self._koneksi()
-            hasil = koneksi.send_config_set(perintah_list, exit_config_mode=False)
-            koneksi.send_command("commit", expect_string=r"#")
-            koneksi.send_command("save", expect_string=r"#")
+            keluaran = koneksi.send_config_set(perintah_list, exit_config_mode=False)
+            log.debug(keluaran)
+            if keluaran_gagal(keluaran):
+                raise RuntimeError(f"perintah ditolak router: {keluaran.strip()[-200:]}")
+
+            out_commit = koneksi.send_command("commit", expect_string=r"#")
+            if keluaran_gagal(out_commit):
+                # Perubahan yang gagal di-commit dibuang agar tidak tertinggal
+                # di sesi konfigurasi berikutnya
+                koneksi.send_command("exit discard", expect_string=r"[$#]")
+                raise RuntimeError(f"commit gagal: {out_commit.strip()[-200:]}")
+            hasil["tahap"] = "commit_ok"
+
+            out_save = koneksi.send_command("save", expect_string=r"#")
+            hasil["tersimpan"] = not keluaran_gagal(out_save)
+            if not hasil["tersimpan"]:
+                log.warning(f"Commit berhasil tetapi save gagal: {out_save.strip()[-200:]}")
+
+            if periksa is not None:
+                grup = self._baca_grup(koneksi)
+                cocok = [ip for ip in periksa if (ip in grup) == harus_ada]
+                hasil["terverifikasi"] = cocok
+                if len(cocok) == len(periksa):
+                    hasil["tahap"] = "terverifikasi"
+                else:
+                    log.error(f"{len(periksa) - len(cocok)} IP tidak terverifikasi setelah commit")
+
             koneksi.send_command("exit", expect_string=r"[$#]")
-            log.info(f"Berhasil: {deskripsi}")
-            log.debug(hasil)
+            log.info(f"Berhasil ({hasil['tahap']}): {deskripsi}")
             return True
 
         except Exception as e:
-            log.error(f"Gagal {deskripsi}: {e}")
-            return False
+            log.error(f"Gagal {deskripsi} (tahap {hasil['tahap']}): {e}")
+            return hasil["tahap"] != "dikirim"
 
         finally:
             if koneksi:
@@ -245,7 +307,9 @@ class ModulMitigasi:
         if alasan:
             deskripsi += f" ({alasan})"
 
-        berhasil = self._jalankan(perintah, deskripsi)
+        self.hasil_terakhir = None
+        berhasil = self._jalankan(perintah, deskripsi, periksa=[ip])
+        berhasil = berhasil and ip in self._terverifikasi([ip])
 
         if berhasil:
             self.terblokir[ip] = datetime.now() + timedelta(minutes=durasi_menit)
@@ -265,7 +329,9 @@ class ModulMitigasi:
             f"delete firewall group address-group {FIREWALL_GROUP} address {ip}",
         ]
 
-        berhasil = self._jalankan(perintah, f"mencabut blokir {ip}")
+        self.hasil_terakhir = None
+        berhasil = self._jalankan(perintah, f"mencabut blokir {ip}", periksa=[ip], harus_ada=False)
+        berhasil = berhasil and ip in self._terverifikasi([ip])
 
         if berhasil:
             self.terblokir.pop(ip, None)
@@ -304,11 +370,18 @@ class ModulMitigasi:
             deskripsi = f"memblokir {len(baru)} IP dalam satu sesi selama {durasi_menit} menit"
             if alasan:
                 deskripsi += f" ({alasan})"
-            if not self._jalankan(perintah, deskripsi):
+            self.hasil_terakhir = None
+            if not self._jalankan(perintah, deskripsi, periksa=baru):
                 return []
+            # IP yang tidak terbaca di router setelah commit tidak dianggap
+            # terblokir (butir 27)
+            gagal = set(baru) - self._terverifikasi(baru)
+            if gagal:
+                log.error(f"{len(gagal)} IP tidak terverifikasi aktif di router: {sorted(gagal)}")
+                ips = [ip for ip in ips if ip not in gagal]
 
         diperpanjang = len(ips) - len(baru)
-        if diperpanjang:
+        if diperpanjang > 0:
             log.info(f"{diperpanjang} IP sudah terblokir, durasi diperpanjang")
 
         for ip in ips:
@@ -329,8 +402,11 @@ class ModulMitigasi:
             f"delete firewall group address-group {FIREWALL_GROUP} address {ip}"
             for ip in ips
         ]
-        if not self._jalankan(perintah, f"mencabut blokir {len(ips)} IP dalam satu sesi"):
+        self.hasil_terakhir = None
+        if not self._jalankan(perintah, f"mencabut blokir {len(ips)} IP dalam satu sesi",
+                              periksa=ips, harus_ada=False):
             return []
+        ips = sorted(self._terverifikasi(ips))
 
         for ip in ips:
             self.terblokir.pop(ip, None)
@@ -353,6 +429,64 @@ class ModulMitigasi:
             log.info(f"{len(dicabut)} blokir dicabut otomatis karena kedaluwarsa")
 
         return dicabut
+
+    def _terverifikasi(self, ips):
+        """
+        IP yang dinyatakan berhasil oleh eksekusi terakhir. Bila router tidak
+        dibaca ulang (dry run atau _jalankan diganti pada pengujian), seluruh
+        IP dianggap berhasil.
+        """
+        h = self.hasil_terakhir
+        if not h or h.get("terverifikasi") is None:
+            return set(ips)
+        return set(h["terverifikasi"]) & set(ips)
+
+    def sinkronkan_router(self, durasi_menit=15):
+        """
+        Menyamakan daftar blokir backend dengan BLOKIR_NDR di router (butir 28).
+        Dipanggil saat backend dijalankan ulang tanpa me-restart VyOS:
+            - IP yang ada di router tetapi tidak di daftar backend ditambahkan
+              dengan kedaluwarsa baru (durasi_menit), sehingga tetap dicabut
+              otomatis dan tidak tertinggal selamanya
+            - IP yang ada di daftar backend tetapi sudah tidak ada di router
+              dihapus dari daftar
+        Mengembalikan ringkasan {"ditambah", "dihapus", "router"}; bila router
+        tidak terbaca, None dan daftar backend tidak diubah.
+        """
+        if self.dry_run:
+            log.info("[DRY RUN] Sinkronisasi router dilewati")
+            return {"ditambah": [], "dihapus": [], "router": sorted(self.terblokir), "dry_run": True}
+        koneksi = None
+        try:
+            koneksi = self._koneksi()
+            grup = self._baca_grup(koneksi, mode_konfigurasi=False)
+        except Exception as e:
+            log.error(f"Sinkronisasi router gagal, daftar backend tidak diubah: {e}")
+            return None
+        finally:
+            if koneksi:
+                try:
+                    koneksi.disconnect()
+                except Exception:
+                    pass
+
+        ditambah, dihapus = [], []
+        kedaluwarsa = datetime.now() + timedelta(minutes=durasi_aman(durasi_menit))
+        for ip in sorted(grup):
+            try:
+                ip = ip_aman(ip)
+            except ValueError:
+                continue
+            if ip not in self.terblokir:
+                self.terblokir[ip] = kedaluwarsa
+                ditambah.append(ip)
+        for ip in sorted(set(self.terblokir) - grup):
+            self.terblokir.pop(ip)
+            dihapus.append(ip)
+        self._simpan_status()
+        log.info(f"Sinkronisasi router: {len(grup)} IP di BLOKIR_NDR, "
+                 f"{len(ditambah)} ditambahkan, {len(dihapus)} dihapus dari daftar backend")
+        return {"ditambah": ditambah, "dihapus": dihapus, "router": sorted(grup)}
 
     def daftar_terblokir(self):
         """Mengembalikan daftar IP terblokir beserta sisa waktunya."""

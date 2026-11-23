@@ -11,6 +11,10 @@ const JEDA_MAKS_MS = 30_000;
 // Server mengirim ping tiap 20 detik; bila lebih lama dari ini tanpa pesan
 // apa pun, koneksi dianggap mati walau socket belum menutup.
 const BATAS_HENING_MS = 60_000;
+// Butir 34: selama tersambung, data dimuat ulang lewat REST secara berkala
+// sebagai jaring pengaman bila ada pesan WS yang terlewat (mis. setelah
+// tersambung kembali), sehingga tampilan tidak perlu dimuat ulang manual.
+const INTERVAL_SINKRON_MS = 60_000;
 
 export interface Keadaan {
   status: StatusSistem | null;
@@ -251,6 +255,12 @@ export function useDashboard() {
       }
     }, 10_000);
 
+    const penyinkron = setInterval(() => {
+      if (ws?.readyState === WebSocket.OPEN && restSiap && penyangga.current === null) {
+        muatRest().catch(() => undefined);
+      }
+    }, INTERVAL_SINKRON_MS);
+
     muatRest()
       .then(() => (restSiap = true))
       .catch((e) => toast("galat", `Gagal memuat data awal: ${e.message}`))
@@ -260,6 +270,7 @@ export function useDashboard() {
       berhenti = true;
       clearTimeout(timerSambung);
       clearInterval(pengawas);
+      clearInterval(penyinkron);
       ws?.close();
     };
   }, [muatRest, muatTerblokir, toast]);

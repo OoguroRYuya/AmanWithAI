@@ -49,3 +49,26 @@ def test_conf_0700001_blokir_otomatis():
     ip = "192.168.20.90"
     hasil = putuskan(ddos(ip, 25, conf=0.700001))
     assert ip in hasil.ip_blokir
+
+
+# Butir 24: perilaku di dalam dan di luar rentang toleransi 1e-9 dibuat
+# eksplisit. Toleransi adalah keputusan desain: nilai yang selisihnya dari
+# ambang lebih kecil dari toleransi dianggap memenuhi ambang.
+
+def test_conf_dalam_toleransi_dianggap_memenuhi():
+    ip = "192.168.20.90"
+    hasil = putuskan(ddos(ip, 25, conf=0.70 - 5e-10))
+    assert ip in hasil.ip_blokir
+
+
+def test_conf_di_luar_toleransi_di_bawah_ambang():
+    ip = "192.168.20.90"
+    hasil = putuskan(ddos(ip, 25, conf=0.70 - 2e-9))
+    assert ip not in hasil.ip_blokir
+    assert ip in kandidat_semua(hasil)
+
+
+def test_rasio_dalam_dan_di_luar_toleransi():
+    assert kp._memenuhi(0.80 - 5e-10, 0.80)
+    assert not kp._memenuhi(0.80 - 2e-9, 0.80)
+    assert kp._memenuhi(0.80, 0.80)

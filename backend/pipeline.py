@@ -78,6 +78,37 @@ def akhir_window(window_epoch):
     return pd.Timestamp(int(window_epoch) + ef.WINDOW_SECONDS, unit="s")
 
 
+def potong_isi(isi):
+    """
+    Memotong isi CSV nfdump (bytes) menjadi baris data per indeks jendela.
+    Mengembalikan (header, {window_idx: [baris, ...]}). Baris yang stempel
+    waktunya tidak terbaca (mis. ringkasan nfdump) dibuang. Dipakai untuk
+    menggabungkan flow terlambat dengan jendela asalnya (butir 41).
+    """
+    baris = isi.decode("utf-8", errors="replace").splitlines(keepends=True)
+    baris = [b if b.endswith("\n") else b + "\n" for b in baris if b.strip()]
+    if not baris:
+        return ",".join(ef.KOLOM_FMT_DEFAULT) + "\n", {}
+
+    token = [t.strip().lower() for t in baris[0].split(",")]
+    if any(t in ef._NAMA_HEADER for t in token):
+        header, data = baris[0], baris[1:]
+    else:
+        header, data = ",".join(ef.KOLOM_FMT_DEFAULT) + "\n", baris
+
+    ts = pd.to_datetime(
+        pd.Series([b.split(",", 1)[0].strip() for b in data], dtype=object), errors="coerce"
+    )
+    window = (ts - pd.Timestamp("1970-01-01")) // pd.Timedelta(seconds=ef.WINDOW_SECONDS)
+
+    potongan = {}
+    for b, w in zip(data, window):
+        if pd.isna(w):
+            continue
+        potongan.setdefault(int(w), []).append(b)
+    return header, potongan
+
+
 def potong_per_window(path):
     """
     Memotong satu CSV nfdump menjadi potongan per jendela WINDOW_SECONDS

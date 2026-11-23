@@ -180,3 +180,73 @@ def test_arsip_mencatat_keputusan_admin(klien):
     import konfigurasi as cfg
     status = {e["status"] for e in _baca_arsip(cfg.BERKAS_ARSIP_RIWAYAT)}
     assert {"disetujui", "ditolak"} <= status
+
+
+@butuh_model
+def test_flow_terlambat_digabung_ke_jendela_asal(klien):
+    """
+    Butir 41: flow jendela 09:42 yang tiba pada file berikutnya digabung ke
+    jendela asalnya. Hasil akhirnya sama dengan memproses jendela utuh
+    sekaligus: tidak ada insiden ganda, ringkasan trafik tidak ditimpa
+    potongan kedua, dan id insiden pertama tetap.
+    """
+    import main
+
+    def ingest(isi, nama):
+        r = klien.post("/api/ingest", content=isi,
+                       headers={"Content-Type": "text/csv", "X-Nama-File": nama})
+        assert r.status_code == 202
+        tunggu_antrean(klien)
+
+    def insiden_jendela(window, nama):
+        data = klien.get("/api/riwayat", params={"jenis": "insiden", "limit": 500}).json()["data"]
+        hasil = {}
+        for e in data:
+            if e["window"] == window and e["nama_file"] == nama:
+                kunci = (e["kelas"], e["kunci"], e["bagian"])
+                assert kunci not in hasil, f"insiden ganda {kunci}"
+                hasil[kunci] = e
+        return hasil
+
+    baris = FIXTURE_CSV.read_bytes().decode().splitlines(keepends=True)
+    header, data = baris[0], baris[1:]
+    potong = len(data) - 400
+
+    # Acuan: jendela utuh diproses sekaligus
+    ingest((header + "".join(data)).encode(), "utuh")
+    acuan_trafik = klien.get("/api/trafik").json()["data"][-1]
+    window = acuan_trafik["window"]
+    acuan = insiden_jendela(window, "utuh")
+    n_riwayat_acuan = len(main.riwayat_deteksi)
+
+    # Jendela yang sama dikirim dalam dua potongan
+    main.jendela_terproses.clear()
+    ingest((header + "".join(data[:potong])).encode(), "potongan1")
+    pertama = insiden_jendela(window, "potongan1")
+    n_trafik = klien.get("/api/trafik").json()["total"]
+    ingest((header + "".join(data[potong:])).encode(), "potongan2")
+
+    trafik = klien.get("/api/trafik").json()
+    assert trafik["total"] == n_trafik            # tidak ada entri jendela baru
+    akhir = trafik["data"][-1]
+    assert akhir["window"] == window and akhir["jumlah_pembaruan"] == 1
+    assert akhir["per_kelas"] == acuan_trafik["per_kelas"]   # sama dengan jendela utuh
+
+    kedua = insiden_jendela(window, "potongan1")
+    # insiden dari potongan pertama tetap dengan id yang sama
+    for kunci, e in pertama.items():
+        assert kedua[kunci]["id"] == e["id"]
+    # tiap insiden hanya sekali, dan isinya sama dengan pemrosesan jendela utuh
+    assert set(kedua) == set(acuan)
+    for kunci, e in kedua.items():
+        assert e["jumlah_flow"] == acuan[kunci]["jumlah_flow"]
+        assert e["status"] == acuan[kunci]["status"]
+    assert any(e["jumlah_pembaruan"] == 1 and e["nama_file_pembaruan"] == "potongan2"
+               for e in kedua.values())
+
+    # potongan kedua yang dikirim ulang tidak mengubah apa pun
+    n_riwayat = len(main.riwayat_deteksi)
+    ingest((header + "".join(data[potong:])).encode(), "potongan2-ulang")
+    assert len(main.riwayat_deteksi) == n_riwayat
+    assert klien.get("/api/trafik").json()["data"][-1]["jumlah_pembaruan"] == 1
+    assert n_riwayat_acuan <= n_riwayat

@@ -82,3 +82,16 @@ def klien():
         r = c.post("/api/masuk", json={"password": PASSWORD_UJI})
         assert r.status_code == 200, r.text
         yield c
+
+
+@pytest.fixture(autouse=True)
+def cache_jendela_bersih():
+    """
+    Beberapa tes meng-ingest fixture CSV yang sama berulang kali sebagai
+    kejadian terpisah. Cache jendela (penggabungan flow terlambat, butir 41)
+    dikosongkan sebelum setiap tes agar ingest itu tidak dianggap flow ganda.
+    """
+    main = sys.modules.get("main")
+    if main is not None:
+        main.jendela_terproses.clear()
+    yield
