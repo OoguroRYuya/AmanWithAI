@@ -41,8 +41,11 @@ def ringkas(nama, nilai):
     if not nilai:
         print(f"  {nama}: (tidak ada data)", file=sys.stderr)
         return
-    print(f"  {nama}: n={len(nilai)} min={min(nilai):.1f} rata={statistics.mean(nilai):.1f} "
-          f"maks={max(nilai):.1f} detik", file=sys.stderr)
+    sb = statistics.stdev(nilai) if len(nilai) > 1 else 0.0
+    # median dan simpangan baku ikut dilaporkan (koreksi Pak Deni butir 43)
+    print(f"  {nama}: n={len(nilai)} min={min(nilai):.1f} median={statistics.median(nilai):.1f} "
+          f"rata={statistics.mean(nilai):.1f} sb={sb:.1f} maks={max(nilai):.1f} detik",
+          file=sys.stderr)
 
 
 def main():
