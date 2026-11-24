@@ -595,6 +595,8 @@ async def lifespan(app: FastAPI):
     if not cfg.DRY_RUN:
         sinkron = await asyncio.to_thread(mitigator.sinkronkan_router, cfg.DURASI_BLOKIR_MENIT)
         _audit("sinkron_router", "otomatis", hasil=sinkron)
+        if sinkron is not None:
+            print(f"Sinkronisasi router: {sinkron}")
         if sinkron is None:
             print("PERINGATAN: router tidak terbaca saat startup; daftar blokir belum disinkronkan")
 
@@ -989,7 +991,8 @@ async def blokir_manual(req: MitigasiRequest):
 
     berhasil = await _mitigasi(mitigator.blokir, req.ip, req.durasi_menit, req.alasan)
     _audit("blokir", "admin", ip=[req.ip], durasi_menit=req.durasi_menit, alasan=req.alasan,
-           berhasil=berhasil, dry_run=cfg.DRY_RUN)
+           berhasil=berhasil, dry_run=cfg.DRY_RUN,
+           tahap_router=(mitigator.hasil_terakhir or {}).get("tahap"))
     if not berhasil:
         raise HTTPException(500, f"Gagal memblokir {req.ip}")
 
