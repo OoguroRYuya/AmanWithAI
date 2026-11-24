@@ -242,6 +242,17 @@ export function useDashboard() {
       soket.onclose = () => {
         if (berhenti || ws !== soket) return;
         dispatch({ t: "koneksi", data: "terputus" });
+        // Sesi admin disimpan di memori backend, jadi hilang bila backend
+        // dijalankan ulang; WS lalu ditolak (403) tanpa kode yang bisa dibaca
+        // browser. Tanyakan status sesi lewat REST: bila backend sudah hidup
+        // tetapi sesi tidak valid, kembali ke layar masuk. Bila backend masih
+        // mati, permintaan gagal dan percobaan sambung ulang berlanjut.
+        api
+          .cekSesi()
+          .then((s) => {
+            if (!berhenti && !s.masuk) window.dispatchEvent(new Event(api.EVENT_SESI_HABIS));
+          })
+          .catch(() => undefined);
         // backoff eksponensial 1s, 2s, 4s, ... maks 30s, dengan sedikit acak
         const jeda = Math.min(JEDA_MAKS_MS, 1000 * 2 ** percobaan) + Math.random() * 500;
         percobaan += 1;
