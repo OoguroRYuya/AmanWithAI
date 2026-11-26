@@ -67,7 +67,7 @@ from saran_tindakan import susun_saran, terapkan_status  # noqa: E402
 log = logging.getLogger("ndr")
 
 FITUR = [
-    "duration", "packet_count", "byte_count", "dst_port_count",
+    "duration", "packet_count", "byte_count", "dst_port_count", "dst_ip_count",
     "avg_packet_size", "flow_rate", "syn_flag_count",
     "protocol", "mean_packet_interval",
 ]
@@ -684,6 +684,7 @@ class FlowInput(BaseModel):
     packet_count: int = 0
     byte_count: int = 0
     dst_port_count: int = 0
+    dst_ip_count: int = 1
     avg_packet_size: float = 0.0
     flow_rate: float = 0.0
     syn_flag_count: int = 0
