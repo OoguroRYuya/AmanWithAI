@@ -1,7 +1,7 @@
 {
  "_catatan": "Dibekukan SEBELUM perekaman sesi 6 (commit yang sama dengan model). K2_f1_pengembangan diisi dari F1 makro model final pada sesi 4+5 (data evaluasi pengembangan) hasil latih_model.py --uji-sesi 4 5 --val-sesi 3. Urutan RF vs XGB bukan kriteria.",
  "K1_f1_makro_min": 0.98,
- "K2_f1_pengembangan": null,
+ "K2_f1_pengembangan": 0.9989,
  "K2_selisih_maks": 0.02,
  "K3_recall_jenis_min": 0.90,
  "K3_flow_min_per_jenis": 100,
